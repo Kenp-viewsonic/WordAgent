@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Office Agent Local</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="header">
+        <div class="header-row">
+          <h1>Word Agent</h1>
+          <button id="menuToggle" class="menu-toggle" type="button" aria-label="菜单">☰</button>
+        </div>
+        <p>本地运行，直连你的模型订阅</p>
+      </header>
+
+      <!-- Sidebar overlay -->
+      <div id="sidebarOverlay" class="sidebar-overlay"></div>
+
+      <!-- Right sidebar -->
+      <aside class="sidebar" id="menuSidebar">
+        <div class="sidebar-header">
+          <span>配置与知识库</span>
+          <button id="sidebarClose" class="sidebar-close" type="button" aria-label="关闭">✕</button>
+        </div>
+        <div class="sidebar-body">
+        <section class="subcard">
+          <h2>模型配置</h2>
+          <label>配置方案
+            <div class="row actions">
+              <select id="presetSelect">
+                <option value="">-- 未保存的配置 --</option>
+              </select>
+              <button id="loadPreset" class="secondary" type="button">加载</button>
+            </div>
+          </label>
+          <div class="row actions">
+            <button id="savePreset" class="secondary" type="button">保存为方案</button>
+            <button id="deletePreset" class="secondary danger" type="button">删除方案</button>
+          </div>
+          <div id="presetNameRow" class="row actions" style="display:none;">
+            <input id="presetNameInput" type="text" placeholder="输入方案名称，如 DeepSeek" />
+            <button id="presetNameConfirm" class="secondary" type="button">确认</button>
+            <button id="presetNameCancel" class="secondary" type="button">取消</button>
+          </div>
+          <label>Base URL <input id="baseUrl" placeholder="https://api.openai.com/v1" /></label>
+          <label>API Key <input id="apiKey" type="password" placeholder="sk-..." /></label>
+          <label>Model
+            <div class="row actions">
+              <input id="model" list="modelList" placeholder="输入或选择模型ID" />
+              <datalist id="modelList"></datalist>
+              <button id="refreshModels" class="secondary" type="button">刷新模型列表</button>
+            </div>
+          </label>
+          <div class="row">
+            <label>Temperature <input id="temperature" type="number" min="0" max="2" step="0.1" value="0.2" /></label>
+            <label>Max Tokens <input id="maxTokens" type="number" min="128" step="1" value="900" /></label>
+          </div>
+          <div class="row">
+            <label>首次响应超时(秒) <input id="firstTokenTimeout" type="number" min="5" max="120" step="1" value="20" /></label>
+            <label>整体超时(秒) <input id="overallTimeout" type="number" min="30" max="600" step="10" value="240" /></label>
+          </div>
+          <label class="checkbox-label">
+            <input id="enableThinking" type="checkbox" />
+            开启思考模式（Thinking / Reasoning）
+          </label>
+          <p class="status" style="color:var(--muted); margin-top:-0.3rem;">DeepSeek、Agnes 等模型支持先思考再回答，提升代码质量和任务拆解能力。</p>
+          <div id="thinkingOptions" style="display:none; margin-left:0.5rem; border-left:2px solid var(--primary); padding-left:0.8rem;">
+            <label class="checkbox-label">
+              <input id="includeReasoningContent" type="checkbox" checked />
+              回传思维链内容（Include reasoning_content）
+            </label>
+            <p class="status" style="color:var(--muted); margin-top:-0.3rem;">工具调用轮次会始终回传（DeepSeek 要求）。关闭此选项仅跳过普通对话轮次的思维链。</p>
+            <div class="row">
+              <label>思考强度
+                <select id="thinkingEffort">
+                  <option value="high" selected>high（推荐）</option>
+                  <option value="medium">medium</option>
+                </select>
+              </label>
+              <label>参数格式
+                <select id="thinkingFormat">
+                  <option value="deepseek" selected>DeepSeek 格式</option>
+                  <option value="openai">OpenAI 兼容格式</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <button id="saveConfig">保存配置</button>
+          <p id="configStatus" class="status"></p>
+        </section>
+
+        <section class="subcard">
+          <h2>Agent 行为</h2>
+          <label>最大迭代次数（防止无限循环）
+            <input id="maxIterations" type="number" min="1" max="50" step="1" value="10" />
+          </label>
+          <p class="status" style="color:var(--muted);">数值越大，Agent 能执行越复杂的多步任务。建议 8-15。<br><strong>跟随当前模型配置保存</strong>，切换预设方案时自动跟随对应模型的值。</p>
+        </section>
+
+        <section class="subcard">
+          <h2>知识库管理</h2>
+          <input id="kbFile" type="file" />
+          <div class="row actions">
+            <button id="uploadFile">上传并索引</button>
+            <button id="refreshKb" class="secondary">刷新状态</button>
+          </div>
+          <p id="kbStatus" class="status"></p>
+          <p id="kbMeta" class="status"></p>
+          <div id="kbFileList" class="kb-file-list"></div>
+          <div class="row actions">
+            <button id="clearKb" class="secondary danger">清空知识库</button>
+            <button id="exportKb" class="secondary" type="button">导出存档</button>
+          </div>
+          <div class="row actions">
+            <label class="import-label">
+              <input id="importKbFile" type="file" accept=".json" hidden />
+              <span class="import-btn secondary">导入存档</span>
+            </label>
+            <select id="importMode">
+              <option value="merge">合并（保留现有）</option>
+              <option value="replace">替换（覆盖现有）</option>
+            </select>
+          </div>
+          <p id="kbImportStatus" class="status"></p>
+        </section>
+        </div>
+      </aside>
+
+      <section class="card chat-card">
+        <h2>对话</h2>
+        <div class="row actions">
+          <select id="sessionSelect"></select>
+          <button id="newSession" class="secondary" type="button">新建会话</button>
+        </div>
+        <div class="row actions">
+          <button id="clearSession" class="secondary" type="button">清空当前会话</button>
+          <button id="deleteSession" class="secondary danger" type="button">删除当前会话</button>
+        </div>
+        <div id="chatLog" class="chatlog"></div>
+        <div id="dropZone" class="drop-zone">
+          <textarea id="userInput" rows="4" placeholder="例如：在第三章后加一段总结（支持拖拽纯文本文件）"></textarea>
+          <div id="dropOverlay" class="drop-overlay" style="display:none;">📂 释放以附加文件</div>
+        </div>
+        <div id="attachmentPreview" class="attachment-preview" style="display:none;">
+          <span id="attachmentName" class="attachment-name"></span>
+          <span id="attachmentSize" class="attachment-size"></span>
+          <button id="removeAttachment" class="secondary danger" type="button">✕</button>
+        </div>
+        <div class="chat-actions">
+          <input id="fileInput" type="file" accept=".txt,.md,.json,.csv,.xml,.yaml,.yml,.log,.ini,.cfg,.conf,.toml,.py,.js,.ts,.java,.c,.cpp,.h,.hpp,.go,.rs,.rb,.php,.sh,.bat,.ps1,.sql,.html,.css,.svg" hidden />
+          <button id="attachBtn" class="secondary icon-only" type="button" title="附加纯文本文件">📎</button>
+          <button id="sendMsg" class="primary">发送</button>
+          <button id="stopBtn" class="danger" type="button" title="停止当前生成" style="display:none;">⏹ 停止</button>
+          <button id="retryLast" class="secondary icon-only" type="button" title="重试上一条">🔁</button>
+          <label id="autopilotLabel" class="autopilot-label" title="开启后跳过确认，所有操作自动执行">
+            <input type="checkbox" id="autopilotToggle" />
+            <span>Autopilot</span>
+          </label>
+          <select id="insertMode" class="flex-1">
+            <option value="smart_action">智能操作</option>
+            <option value="chat_only">仅对话</option>
+            <option value="replace_selection">替换选区</option>
+            <option value="append_end">追加文末</option>
+          </select>
+        </div>
+
+        <!-- Action Plan Preview Panel -->
+        <div id="actionPlanPanel" class="action-plan-panel" style="display:none;">
+          <div class="action-plan-header">
+            <span>📋 操作计划预览</span>
+            <div class="row actions">
+              <button id="actionPlanConfirm" class="action-plan-btn">确认执行</button>
+              <button id="actionPlanCancel" class="action-plan-btn secondary">取消</button>
+            </div>
+          </div>
+          <div id="actionPlanContent" class="action-plan-content"></div>
+        </div>
+
+        <!-- Simple Text Preview Panel (legacy) -->
+        <div id="previewPanel" class="preview-panel" style="display:none;">
+          <div class="preview-header">
+            <span>预览：即将插入的内容</span>
+            <div class="row actions">
+              <button id="previewConfirm" class="preview-btn">确认插入</button>
+              <button id="previewCancel" class="preview-btn secondary">取消</button>
+            </div>
+          </div>
+          <div id="previewContent" class="preview-content"></div>
+        </div>
+        <p id="chatStatus" class="status"></p>
+      </section>
+
+      <!-- Autopilot confirmation modal -->
+      <div id="autopilotModal" class="modal-overlay" style="display:none;">
+        <div class="modal-card">
+          <h2 class="modal-title">⚠️ 开启 Autopilot</h2>
+          <div class="modal-body">
+            <p>开启后将<strong>自动执行所有操作</strong>，不再逐条要求确认。</p>
+            <ul>
+              <li>建议在开启前<strong>备份当前文档</strong></li>
+              <li>仅对<strong>本次会话</strong>有效，关闭侧边栏后自动失效</li>
+              <li>对文档的所有修改将<strong>立即生效</strong>，无法预览</li>
+            </ul>
+          </div>
+          <div class="modal-actions">
+            <button id="autopilotCancel" class="secondary" type="button">取消</button>
+            <button id="autopilotConfirm" class="primary danger" type="button">确认开启</button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

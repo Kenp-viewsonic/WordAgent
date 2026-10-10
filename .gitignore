@@ -1,2 +1,17 @@
-plans/
+# Reference-only legacy tree — not part of the shipped code
 officeAgent/
+
+# Node
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# .NET
+bin/
+obj/
+*.user
+.vs/
+
+# Runtime data (production data lives in %LOCALAPPDATA%\OfficeAgent)
+data/
