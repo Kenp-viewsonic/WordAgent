@@ -123,9 +123,13 @@ namespace OfficeAgent.ComHost
                 int id = (int)msg["id"];
                 string method = (string)msg["method"] ?? "";
                 JObject payload = (JObject)msg["payload"] ?? new JObject();
-                Addin.Trace("Bridge call: " + method);
+                JObject action = payload["action"] as JObject;
+                string actionName = action != null ? (string)action["action"] : "";
+                Addin.Trace("Bridge call: " + method + (actionName.Length > 0 ? " (" + actionName + ")" : ""));
+                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                 WordToolExecutor.ToolResult result = WordToolExecutor.Execute(method, payload);
+                stopwatch.Stop();
 
                 var response = new JObject
                 {
@@ -143,7 +147,7 @@ namespace OfficeAgent.ComHost
                     response["error"] = result.Error ?? "文档工具执行失败";
                 }
                 webView.CoreWebView2.PostWebMessageAsJson(response.ToString(Formatting.None));
-                Addin.Trace("Bridge done: " + method + " success=" + result.Success);
+                Addin.Trace("Bridge done: " + method + " success=" + result.Success + " " + stopwatch.ElapsedMilliseconds + "ms");
             }
             catch (Exception ex)
             {

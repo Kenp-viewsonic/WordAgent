@@ -74,14 +74,26 @@ namespace OfficeAgent.ComHost
             string name = (string)action["action"] ?? "";
             JObject p = (JObject)action["params"] ?? new JObject();
 
+            // Plan §6.4: Word OM calls are immediate (no Office.js batching) —
+            // wrap every action in ScreenUpdating + a single undo record so
+            // multi-round autopilot edits stay fast and undo as one step.
+            bool undoStarted = false;
             try
             {
+                try { App.ScreenUpdating = false; } catch { }
+                try { App.UndoRecord.StartCustomRecord("WordAgent: " + name); undoStarted = true; } catch { }
+
                 string result = DispatchAction(name, p);
                 return new ToolResult { Success = true, Result = result };
             }
             catch (Exception ex)
             {
                 return new ToolResult { Success = false, Error = ex.Message };
+            }
+            finally
+            {
+                if (undoStarted) { try { App.UndoRecord.EndCustomRecord(); } catch { } }
+                try { App.ScreenUpdating = true; } catch { }
             }
         }
 
@@ -785,26 +797,44 @@ namespace OfficeAgent.ComHost
 
         private static string FindAndReplace(dynamic doc, JObject p, bool v2)
         {
-            string findText = (string)p["find_text"];
+            string findText = (string)p["find_text"] ?? "";
+            if (string.IsNullOrEmpty(findText)) throw new Error("find_text 不能为空");
             string replaceText = (string)p["replace_text"] ?? "";
             bool matchCase = p["match_case"] != null && (bool)p["match_case"];
             bool matchWholeWord = v2 && p["match_whole_word"] != null && (bool)p["match_whole_word"];
             bool replaceAll = v2 && p["replace_all"] != null && (bool)p["replace_all"];
 
-            // Count matches first (same reporting as the TS implementation).
+            // Count matches (same reporting as the TS implementation). Fast
+            // path: scan Content.Text once — a per-match Find loop costs one
+            // COM round trip per hit and visibly drags Word down on big docs.
+            // Whole-word mode keeps Word Find for exact semantics.
             int total = 0;
+            if (!matchWholeWord)
+            {
+                string docText = (string)doc.Content.Text ?? "";
+                StringComparison cmp = matchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+                int idx = 0;
+                while ((idx = docText.IndexOf(findText, idx, cmp)) >= 0)
+                {
+                    total++;
+                    idx += findText.Length;
+                }
+            }
+            else
             {
                 dynamic rng = doc.Content.Duplicate;
                 while (true)
                 {
                     dynamic find = rng.Find;
                     find.ClearFormatting();
-                    bool hit = find.Execute(findText, matchCase, matchWholeWord, false, false, false, true, 0);
+                    bool hit = find.Execute(findText, matchCase, true, false, false, false, true, 0);
                     if (!hit) break;
                     total++;
-                    rng.Start = rng.End;
+                    int next = (int)rng.End;
+                    if (next <= (int)rng.Start) break;
+                    rng.Start = next;
                     rng.End = doc.Content.End;
-                    if (rng.Start >= rng.End) break;
+                    if ((int)rng.Start >= (int)rng.End) break;
                 }
             }
 
@@ -814,27 +844,26 @@ namespace OfficeAgent.ComHost
                 throw new Error(string.Format("find_and_replace 失败：未找到\"{0}\"。请检查查找文本是否正确，或尝试使用 find_and_replace_v2 配合 match_case=false。", findText));
             }
 
-            int replaced = 0;
+            if (replaceAll)
             {
-                dynamic rng = doc.Content.Duplicate;
-                while (replaced < total)
-                {
-                    dynamic find = rng.Find;
-                    find.ClearFormatting();
-                    bool hit = find.Execute(findText, matchCase, matchWholeWord, false, false, false, true, 0);
-                    if (!hit) break;
-                    rng.Text = replaceText;
-                    replaced++;
-                    if (!replaceAll) break;
-                    rng.Start = rng.End;
-                    rng.End = doc.Content.End;
-                    if (rng.Start >= rng.End) break;
-                }
+                // Bulk replace in one native call — a per-match loop re-renders
+                // the document on every replacement and drags Word down.
+                dynamic rng = doc.Content;
+                dynamic find = rng.Find;
+                find.ClearFormatting();
+                find.Execute(findText, matchCase, matchWholeWord, false, false, false, true, 1, false, replaceText, 2);
+                return string.Format("已替换 {0} 处匹配（共找到 {1} 处）", total, total);
             }
 
-            return v2
-                ? string.Format("已替换 {0} 处匹配（共找到 {1} 处）", replaced, total)
-                : string.Format("已替换 {0} 处匹配中的第 1 处", total);
+            // Replace the first occurrence only.
+            {
+                dynamic rng = doc.Content.Duplicate;
+                dynamic find = rng.Find;
+                find.ClearFormatting();
+                bool hit = find.Execute(findText, matchCase, matchWholeWord, false, false, false, true, 0);
+                if (hit) rng.Text = replaceText;
+            }
+            return string.Format("已替换 {0} 处匹配中的第 1 处", total);
         }
 
         private static string UndoLastAction(dynamic doc, JObject p)

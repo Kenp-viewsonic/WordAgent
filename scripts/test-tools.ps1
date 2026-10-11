@@ -102,6 +102,23 @@ try {
     Check "reply_only" (Invoke-Tool "executeAction" '{"action":"reply_only","params":{}}') '仅回复文本'
     Check "task_complete" (Invoke-Tool "executeAction" '{"action":"task_complete","params":{"summary":"完成"}}') '完成'
 
+    Write-Host "--- perf: large-document replace_all (Word drag-down regression) ---" -ForegroundColor Cyan
+    $lines = 1..400 | ForEach-Object { "这是第 $_ 段测试文本，包含关键词苹果和香蕉，用于批量替换性能测试。" }
+    $insertJson = @{ action = "insert_at_end"; params = @{ content = ($lines -join "\n") } } | ConvertTo-Json -Compress -Depth 5
+    Check "perf: insert 400 paragraphs" (Invoke-Tool "executeAction" $insertJson) '已追加到文档末尾'
+    $swatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $perf = Invoke-Tool "executeAction" '{"action":"find_and_replace_v2","params":{"find_text":"苹果","replace_text":"橙子","replace_all":true,"match_case":false}}'
+    $swatch.Stop()
+    Check "perf: replace_all x400 result" $perf '已替换 400 处匹配'
+    $secs = [Math]::Round($swatch.Elapsed.TotalSeconds, 1)
+    if ($secs -le 20) {
+        Write-Host "  [PASS] perf: replace_all x400 elapsed ${secs}s" -ForegroundColor Green
+        $script:passed++
+    } else {
+        Write-Host "  [FAIL] perf: replace_all x400 took ${secs}s (Word drag-down regression)" -ForegroundColor Red
+        $script:failed++
+    }
+
     Write-Host "--- simple insert + mermaid ---" -ForegroundColor Cyan
     Check "simpleInsert append_end" (Invoke-Tool "simpleInsert" '{"mode":"append_end","text":"简单追加"}') '已追加到文档末尾'
     Check "simpleInsert insert_start" (Invoke-Tool "simpleInsert" '{"mode":"insert_start","text":"简单开头"}') '已插入到文档开头'
