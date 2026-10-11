@@ -13,6 +13,7 @@
     "build:prod": "npm run build:prod -w @office-agent/word-addin && npm run build -w @office-agent/local-agent",
     "build:agent-exe": "powershell -ExecutionPolicy Bypass -File scripts/build-agent.ps1",
     "package": "powershell -ExecutionPolicy Bypass -File scripts/package.ps1",
+    "build:installer": "powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1",
     "smoke": "powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1",
     "test:tools": "powershell -ExecutionPolicy Bypass -File scripts/test-tools.ps1"
   },

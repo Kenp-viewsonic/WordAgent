@@ -60,6 +60,11 @@ try {
     $word = New-Object -ComObject Word.Application
     $word.Visible = $false
     $word.DisplayAlerts = 0
+    # Track this automation instance so the cleanup can force-kill it — a
+    # lingering hidden Word loads the COM add-in and locks the DLL, which then
+    # blocks installers/uninstallers.
+    Start-Sleep -Milliseconds 500
+    $script:wordPid = (Get-Process winword -ErrorAction SilentlyContinue | Sort-Object StartTime -Descending | Select-Object -First 1).Id
     $doc = $word.Documents.Add()
     $appField.SetValue($null, $word)
 
@@ -130,6 +135,10 @@ finally {
     if ($word) {
         try { $word.Documents | ForEach-Object { $_.Close(0) } } catch { }
         try { $word.Quit() } catch { }
+    }
+    if ($script:wordPid) {
+        Start-Sleep -Seconds 2
+        Stop-Process -Id $script:wordPid -Force -ErrorAction SilentlyContinue
     }
 }
 

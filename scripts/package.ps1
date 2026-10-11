@@ -61,14 +61,19 @@ Pop-Location
 if ($trayExit -ne 0) { Write-Error "Tray build failed"; exit 1 }
 Copy-Item (Join-Path $root "apps\tray\bin\Release\net48\OfficeAgent.Tray.exe*") $distDir
 
-# [6/6] Assemble dist
-Write-Host "[6/6] Assembling dist..." -ForegroundColor Yellow
+# [6/7] Assemble dist
+Write-Host "[6/7] Assembling dist..." -ForegroundColor Yellow
 $publicDir = Join-Path $distDir "public"
 New-Item -ItemType Directory -Path $publicDir | Out-Null
 Copy-Item -Recurse (Join-Path $root "apps\word-addin\dist\*") $publicDir
 Copy-Item (Join-Path $root "scripts\README-dist.md") (Join-Path $distDir "README.md")
 Copy-Item (Join-Path $root "scripts\register-com.ps1") $distDir
 Copy-Item (Join-Path $root "scripts\unregister-com.ps1") $distDir
+
+# [7/7] Build the installer (WP4) when Inno Setup is available
+Write-Host "[7/7] Building installer..." -ForegroundColor Yellow
+& (Join-Path $root "scripts\build-installer.ps1")
+if ($LASTEXITCODE -ne 0) { Write-Warning "installer build failed (Inno Setup missing?) - dist\ is still usable" }
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green

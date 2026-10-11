@@ -33,9 +33,22 @@ npm run dev:addin     # UI 开发服务器：http://localhost:3001（代理 /api
 ```bash
 npm run build:prod        # TS + UI 构建
 npm run build:agent-exe   # esbuild + Node SEA → build/agent.exe
-npm run package           # 产出 dist/（agent.exe + 托盘 + public/ + com/）
+npm run package           # 产出 dist/ 并编译安装器 → dist-setup/
+npm run build:installer   # 仅编译安装器（Inno Setup 6，winget install JRSoftware.InnoSetup）
 npm run smoke             # 安全与健康冒烟（token 鉴权 / CORS / 启动）
+npm run test:tools        # 24 文档工具回归（真实 Word 实例，34 用例）
 ```
+
+## 分发安装（WP4）
+
+`dist-setup\OfficeAgent-Setup-<版本>.exe` 即为可分发测试的安装包：
+
+- 双击安装，可选**所有用户**（Program Files + HKLM 注册，需管理员）或**仅当前用户**（%LOCALAPPDATA%\Programs + HKCU 注册，免管理员）
+- 自动注册 COM（32/64 位注册表视图双写，兼容 32/64 位 Office）、写开机自启、开始菜单/桌面快捷方式
+- 检测 WebView2 运行时并引导安装；**安装/卸载前需完全退出 Word**（安装器会提示）
+- 卸载零残留（COM 注册、自启键、快捷方式全清）；用户数据（配置/知识库）可选保留
+
+构建机器需要 Inno Setup 6（`winget install JRSoftware.InnoSetup`）。
 
 ## COM 加载项（WP2）
 
