@@ -48,6 +48,18 @@ powershell -ExecutionPolicy Bypass -File scripts\unregister-com.ps1  # 注销
 加载诊断日志：`%LOCALAPPDATA%\OfficeAgent\logs\com-host.log`。
 构建机器需要 `apps\com-host\lib\Extensibility.dll`（已随源码内置，仅编译期使用；类型内嵌，运行时无 PIA 依赖）。
 
+## 端到端验收清单（WP2）
+
+1. 关闭所有 Word 窗口后重新打开，新建空白文档
+2. 「开始」选项卡右侧出现 **Word Agent** 分组与 **打开助手** 按钮（无任何信任中心配置）
+3. 点击按钮 → 右侧任务窗格打开：首次自动拉起托盘（右下角图标）→ 服务就绪 → 加载 UI
+4. 发一条聊天消息（provider 配置在 `%LOCALAPPDATA%\OfficeAgent\data`，流式回复正常）
+5. 知识库面板可上传/查看/删除文件
+6. **预期不可用**：文档修改类工具（WP3 迁移中），调用会提示不在 Word 宿主/工具失败
+
+排查：按钮缺失 → 重新运行 `register-com.ps1`，或 文件→选项→加载项→管理:禁用项目 中恢复；
+面板异常 → 看 `%LOCALAPPDATA%\OfficeAgent\logs\com-host.log`。改代码重新构建前先关闭 Word（DLL 被占用）。
+
 ## 安全模型（WP1）
 
 - `/v1/*` 全部要求 `X-Agent-Token` 请求头（`/health` 除外，供托盘探活）

@@ -16,7 +16,10 @@ namespace OfficeAgent.ComHost
     [ComVisible(true)]
     [Guid(ClassId)]
     [ProgId(ProgId)]
-    [ClassInterface(ClassInterfaceType.None)]
+    // AutoDual: Ribbon onAction/loadImage/onLoad callbacks are dispatched by
+    // name through IDispatch — with ClassInterface(None) the class methods are
+    // absent from the name table and Word silently drops the click.
+    [ClassInterface(ClassInterfaceType.AutoDual)]
     public class Addin : IDTExtensibility2, IRibbonExtensibility, ICustomTaskPaneConsumer
     {
         public const string ClassId = "EC9522B6-2A5E-4E51-9B7D-55CA3C90A5D6";
@@ -100,33 +103,50 @@ namespace OfficeAgent.ComHost
             return RibbonXml;
         }
 
-        public void OnRibbonLoaded(object ribbon) { }
+        public void OnRibbonLoaded(object ribbon)
+        {
+            Trace("OnRibbonLoaded");
+        }
 
         public object LoadImage(string imageId)
         {
+            Trace("LoadImage " + imageId);
             return IconLoader.GetPictureDisp("icon-32.png");
         }
 
         public void OnOpenPanel(object control)
         {
             Trace("OnOpenPanel taskPane=" + (taskPane != null));
-            if (taskPane == null)
+            try
             {
+                if (taskPane == null)
+                {
+                    MessageBox.Show(
+                        "任务窗格尚未就绪（宿主未提供 CTP 工厂），请重启 Word 后重试。",
+                        "Word Agent",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    return;
+                }
+
+                dynamic ctp = taskPane;
+                bool show = !ctp.Visible;
+                Trace("OnOpenPanel toggling visible=" + show);
+                if (show && paneControl != null)
+                {
+                    paneControl.EnsureStarted();
+                }
+                ctp.Visible = show;
+            }
+            catch (Exception ex)
+            {
+                Trace("OnOpenPanel failed: " + ex.GetType().Name + ": " + ex.Message);
                 MessageBox.Show(
-                    "任务窗格尚未就绪（宿主未提供 CTP 工厂），请重启 Word 后重试。",
+                    "打开任务窗格失败：" + ex.Message,
                     "Word Agent",
                     MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
-                return;
+                    MessageBoxIcon.Error);
             }
-
-            dynamic ctp = taskPane;
-            bool show = !ctp.Visible;
-            if (show && paneControl != null)
-            {
-                paneControl.EnsureStarted();
-            }
-            ctp.Visible = show;
         }
 
         // ── ICustomTaskPaneConsumer ───────────────────────────────────────────
