@@ -2976,7 +2976,7 @@ async function executeActionPlan(plan: ActionPlan): Promise<Array<{ toolCallId: 
       });
       console.error(`[executeActionPlan] action ${i + 1} (${action.action}) failed:`, details);
 
-      if (plan.actions.length > 1) {
+      if (plan.actions.length > 1 && !state.autopilot) {
         const shouldContinue = confirm(`操作 ${i + 1} 失败: ${message}\n\n是否继续执行后续操作？`);
         if (!shouldContinue) break;
       }
@@ -2991,6 +2991,13 @@ async function executeActionPlan(plan: ActionPlan): Promise<Array<{ toolCallId: 
 // ─── Action Plan Preview ────────────────────────────────────────────────────
 
 function showActionPlanPreview(plan: ActionPlan): void {
+  // Autopilot never pauses for confirmation — run any plan that reaches the
+  // preview immediately (safety net over every call path).
+  if (state.autopilot) {
+    state.pendingActionPlan = plan;
+    void confirmActionPlan();
+    return;
+  }
   state.pendingActionPlan = plan;
 
   // Show tool call cards in chat log for visibility
@@ -3156,6 +3163,12 @@ const previewPanel = $<HTMLDivElement>("previewPanel");
 const previewContent = $<HTMLDivElement>("previewContent");
 
 function showSimplePreview(text: string, mode: "replace" | "append_end" | "insert_start"): void {
+  // Autopilot never pauses on the insert preview either.
+  if (state.autopilot) {
+    state.pendingSimpleInsert = { text, mode };
+    void confirmSimplePreview();
+    return;
+  }
   const modeLabels: Record<string, string> = {
     replace: "替换当前选区",
     append_end: "追加到文末",
@@ -3499,6 +3512,14 @@ async function sendAgentMessageStream(
       }
 
       if (event.type === "action_plan") {
+        // Autopilot: run the plan inline and keep looping — never pause for
+        // confirmation mid-run.
+        if (state.autopilot && event.plan.actions.length > 0) {
+          hasToolCall = true;
+          const planResults = await executeActionPlan(event.plan);
+          for (const r of planResults) toolResults.push(r);
+          continue;
+        }
         return { reply: finalReply || event.plan.explanation, actionPlan: event.plan, retrievalCount: finalRetrievalCount, citations: finalCitations, sessionId: sessionId ?? undefined };
       }
 
@@ -3508,7 +3529,13 @@ async function sendAgentMessageStream(
 
       if (event.type === "done") {
         finalReply = event.reply ?? finalReply;
-        finalActionPlan = event.actionPlan ?? finalActionPlan;
+        if (state.autopilot && event.actionPlan && event.actionPlan.actions.length > 0) {
+          hasToolCall = true;
+          const planResults = await executeActionPlan(event.actionPlan);
+          for (const r of planResults) toolResults.push(r);
+        } else {
+          finalActionPlan = event.actionPlan ?? finalActionPlan;
+        }
         if (event.retrievalCount !== undefined) finalRetrievalCount = event.retrievalCount;
         if (event.citations) finalCitations = event.citations;
         if (event.sessionId) sessionId = event.sessionId;
@@ -3574,6 +3601,21 @@ async function continueAgentLoop(
     for (const event of events) {
       if (event.type === "tool_call") {
         hasToolCall = true;
+
+        // Autopilot: execute ALL tools inline, regardless of type.
+        if (state.autopilot) {
+          const executedTools: Array<{ tool: string; params: Record<string, any> }> = [];
+          for (const tool of event.tools) {
+            appendToolCallCard(tool.tool, tool.params);
+            const result = await executeSingleTool(tool);
+            appendToolResultCard(tool.tool, result.success, result.result);
+            currentToolResults.push(result);
+            executedTools.push({ tool: tool.tool, params: tool.params });
+          }
+          await autoReadAfterMutation(executedTools, currentToolResults);
+          continue;
+        }
+
         const perceptionTools = ["read_document", "get_selection_info", "get_document_stats", "get_paragraph_format", "get_document_tables", "read_table"];
         for (const tool of event.tools) {
           if (!perceptionTools.includes(tool.tool)) {
@@ -3611,6 +3653,14 @@ async function continueAgentLoop(
       }
 
       if (event.type === "action_plan") {
+        // Autopilot: run the plan inline and keep looping — never pause for
+        // confirmation mid-run.
+        if (state.autopilot && event.plan.actions.length > 0) {
+          hasToolCall = true;
+          const planResults = await executeActionPlan(event.plan);
+          for (const r of planResults) currentToolResults.push(r);
+          continue;
+        }
         return { reply: finalReply || event.plan.explanation, actionPlan: event.plan, sessionId, retrievalCount: finalRetrievalCount, citations: finalCitations };
       }
 
@@ -3620,7 +3670,13 @@ async function continueAgentLoop(
 
       if (event.type === "done") {
         finalReply = event.reply ?? finalReply;
-        finalActionPlan = event.actionPlan ?? finalActionPlan;
+        if (state.autopilot && event.actionPlan && event.actionPlan.actions.length > 0) {
+          hasToolCall = true;
+          const planResults = await executeActionPlan(event.actionPlan);
+          for (const r of planResults) currentToolResults.push(r);
+        } else {
+          finalActionPlan = event.actionPlan ?? finalActionPlan;
+        }
         if (event.retrievalCount !== undefined) finalRetrievalCount = event.retrievalCount;
         if (event.citations) finalCitations = event.citations;
       }
