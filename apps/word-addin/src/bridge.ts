@@ -6,12 +6,34 @@
  * to the agent over http://127.0.0.1:8787. The agent requires the
  * `X-Agent-Token` header on every /v1/* call; the token is bootstrapped into
  * the same-origin page as `window.__AGENT_TOKEN__`.
+ *
+ * WP3: document tools execute in the COM host (Word OM) via request/response
+ * messages over `window.chrome.webview` — this file owns that protocol.
  */
 
 type WindowWithToken = Window & {
   __AGENT_TOKEN__?: string;
   Word?: unknown;
-  chrome?: { webview?: unknown };
+  chrome?: { webview?: WebViewLike };
+};
+
+type WebViewLike = {
+  postMessage(message: unknown): void;
+  addEventListener(type: "message", handler: (e: { data: unknown }) => void): void;
+};
+
+type BridgeEnvelope = {
+  type: string;
+  id: number;
+  success?: boolean;
+  result?: string;
+  data?: unknown;
+  error?: string;
+};
+
+type PendingCall = {
+  resolve: (value: BridgeEnvelope) => void;
+  reject: (reason: Error) => void;
 };
 
 function hostWindow(): WindowWithToken {
@@ -66,4 +88,71 @@ function isSameOrigin(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+// ─── WP3: WebView2 tool-execution protocol ───────────────────────────────────
+// Request:  { type: "tool-request", id, method, payload }
+// Response: { type: "tool-response", id, success, result?, data?, error? }
+
+let bridgeSeq = 0;
+const bridgePending = new Map<number, PendingCall>();
+
+function initBridgeListener(): void {
+  const webview = hostWindow().chrome?.webview;
+  if (!webview) return;
+  webview.addEventListener("message", (e) => {
+    const msg = e.data as BridgeEnvelope | undefined;
+    if (!msg || msg.type !== "tool-response" || !bridgePending.has(msg.id)) return;
+    const pending = bridgePending.get(msg.id)!;
+    bridgePending.delete(msg.id);
+    if (msg.success) {
+      pending.resolve(msg);
+    } else {
+      pending.reject(new Error(msg.error || "文档工具执行失败"));
+    }
+  });
+}
+
+function bridgeCall(method: string, payload: unknown): Promise<BridgeEnvelope> {
+  const webview = hostWindow().chrome?.webview;
+  if (!webview) {
+    return Promise.reject(new Error("当前环境不支持文档工具（WebView2 桥不可用）"));
+  }
+  initBridgeListener();
+  return new Promise((resolve, reject) => {
+    const id = ++bridgeSeq;
+    bridgePending.set(id, { resolve, reject });
+    webview.postMessage({ type: "tool-request", id, method, payload });
+    setTimeout(() => {
+      if (bridgePending.has(id)) {
+        bridgePending.delete(id);
+        reject(new Error(`文档工具执行超时（${method}）`));
+      }
+    }, 120000);
+  });
+}
+
+export async function bridgeExecuteAction(action: {
+  action: string;
+  params: Record<string, any>;
+  description: string;
+  toolCallId?: string;
+}): Promise<string> {
+  const res = await bridgeCall("executeAction", { action });
+  return res.result ?? "";
+}
+
+export async function bridgeGetStructuredContext(): Promise<unknown> {
+  const res = await bridgeCall("getStructuredContext", {});
+  return res.data;
+}
+
+export async function bridgeGetWordContext(): Promise<{ documentContext: string; selection: string }> {
+  const res = await bridgeCall("getWordContext", {});
+  return (res.data as { documentContext: string; selection: string }) ?? { documentContext: "", selection: "" };
+}
+
+export async function bridgeSimpleInsert(mode: string, text: string): Promise<string> {
+  const res = await bridgeCall("simpleInsert", { mode, text });
+  return res.result ?? "";
 }

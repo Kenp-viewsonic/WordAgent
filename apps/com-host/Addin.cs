@@ -68,9 +68,9 @@ namespace OfficeAgent.ComHost
 
         public void OnConnection(object application, ext_ConnectMode connectMode, object addInInst, ref Array custom)
         {
-            // The Word Application object is late-bound in WP3 (Word OM tool
-            // executor); WP2 only needs the connection lifecycle.
             Trace("OnConnection connectMode=" + connectMode);
+            // WP3: the Word Application backs the Word OM tool executor.
+            WordToolExecutor.App = application;
         }
 
         public void OnDisconnection(ext_DisconnectMode removeMode, ref Array custom)

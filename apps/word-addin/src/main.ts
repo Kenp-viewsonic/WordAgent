@@ -1,4 +1,4 @@
-import { installAuthFetch } from "./bridge.js";
+import { installAuthFetch, isWebViewHost, bridgeExecuteAction, bridgeGetStructuredContext, bridgeGetWordContext, bridgeSimpleInsert } from "./bridge.js";
 
 // In production (bundled), API is on the same origin → empty string.
 // In development, Vite proxies "/api" to the local-agent server.
@@ -1306,6 +1306,16 @@ async function deleteSelectedPreset(): Promise<void> {
 // ─── Word Context (Structured) ───────────────────────────────────────────────
 
 async function getStructuredContext(): Promise<DocumentStructure> {
+  if (isWebViewHost()) {
+    try {
+      return (await bridgeGetStructuredContext()) as DocumentStructure;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "未知错误";
+      console.warn("getStructuredContext bridge failed:", message);
+      return { title: "", totalParagraphs: 0, totalCharacters: 0, paragraphs: [], selection: { text: "" } };
+    }
+  }
+
   const emptyStructure: DocumentStructure = {
     title: "",
     totalParagraphs: 0,
@@ -1473,6 +1483,16 @@ async function getStructuredContext(): Promise<DocumentStructure> {
 
 // Legacy function for backward compatibility
 async function getWordContext(): Promise<{ documentContext: string; selection: string }> {
+  if (isWebViewHost()) {
+    try {
+      return await bridgeGetWordContext();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "未知错误";
+      console.warn("getWordContext bridge failed:", message);
+      return { documentContext: "", selection: "" };
+    }
+  }
+
   try {
     if (typeof Word === "undefined") {
       return { documentContext: "", selection: "" };
@@ -2253,6 +2273,15 @@ async function renderMermaidImage(code: string): Promise<string> {
 }
 
 async function executeAction(action: WordAction): Promise<string> {
+  if (isWebViewHost()) {
+    // Desktop path: execute in the COM host via the WebView2 bridge (WP3/D3).
+    if (action.action === "insert_mermaid_image") {
+      const dataUrl = await renderMermaidImage(String(action.params.mermaid_code ?? ""));
+      action = { ...action, params: { ...action.params, image_data_url: dataUrl } };
+    }
+    return bridgeExecuteAction(action);
+  }
+
   if (typeof Word === "undefined") {
     throw new Error("当前不在 Word 宿主中");
   }
@@ -3084,6 +3113,10 @@ function escapeHtml(text: string): string {
 // ─── Legacy Insert Functions (kept for backward compatibility) ──────────────
 
 async function applyTextToWordSelection(text: string): Promise<void> {
+  if (isWebViewHost()) {
+    await bridgeSimpleInsert("replace", text);
+    return;
+  }
   if (typeof Word === "undefined") {
     throw new Error("当前不在 Word 宿主中");
   }
@@ -3096,13 +3129,18 @@ async function applyTextToWordSelection(text: string): Promise<void> {
 }
 
 async function insertTextAtCursor(text: string): Promise<void> {
-  if (typeof Word === "undefined") {
-    throw new Error("当前不在 Word 宿主中");
-  }
-
   const normalized = cleanupMarkdownForWord(text);
   if (!normalized) {
     throw new Error("没有可插入的正文内容");
+  }
+
+  if (isWebViewHost()) {
+    await bridgeSimpleInsert("at_cursor", normalized);
+    return;
+  }
+
+  if (typeof Word === "undefined") {
+    throw new Error("当前不在 Word 宿主中");
   }
 
   await Word.run(async (context) => {
@@ -3143,6 +3181,17 @@ async function confirmSimplePreview(): Promise<void> {
 
   const { text, mode } = state.pendingSimpleInsert;
   hideSimplePreview();
+
+  if (isWebViewHost()) {
+    try {
+      await bridgeSimpleInsert(mode, text);
+      setStatus(chatStatus, mode === "replace" ? "已替换当前选区（已去除 Markdown）" : mode === "append_end" ? "已追加到文档末尾" : "已插入到文档开头");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "未知错误";
+      setStatus(chatStatus, `插入失败: ${message}`);
+    }
+    return;
+  }
 
   try {
     if (mode === "replace") {

@@ -8,6 +8,8 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace OfficeAgent.ComHost
 {
@@ -96,6 +98,7 @@ namespace OfficeAgent.ComHost
                 await webView.EnsureCoreWebView2Async(env);
                 webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
                 webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+                webView.CoreWebView2.WebMessageReceived += OnWebMessage;
                 webView.CoreWebView2.Navigate(ServiceUrl);
                 webView.Visible = true;
                 message.Visible = false;
@@ -105,6 +108,46 @@ namespace OfficeAgent.ComHost
             {
                 Addin.Trace("Pane init failed: " + ex.Message);
                 message.Text = "任务窗格初始化失败：" + ex.Message;
+            }
+        }
+
+        // ── WP3 bridge: UI ⇄ Word OM tool execution ──────────────────────────
+
+        private void OnWebMessage(object sender, CoreWebView2WebMessageReceivedEventArgs e)
+        {
+            try
+            {
+                JObject msg = JObject.Parse(e.WebMessageAsJson);
+                if ((string)msg["type"] != "tool-request") return;
+
+                int id = (int)msg["id"];
+                string method = (string)msg["method"] ?? "";
+                JObject payload = (JObject)msg["payload"] ?? new JObject();
+                Addin.Trace("Bridge call: " + method);
+
+                WordToolExecutor.ToolResult result = WordToolExecutor.Execute(method, payload);
+
+                var response = new JObject
+                {
+                    ["type"] = "tool-response",
+                    ["id"] = id,
+                    ["success"] = result.Success,
+                };
+                if (result.Success)
+                {
+                    response["result"] = result.Result ?? "";
+                    if (result.Data != null) response["data"] = JToken.FromObject(result.Data);
+                }
+                else
+                {
+                    response["error"] = result.Error ?? "文档工具执行失败";
+                }
+                webView.CoreWebView2.PostWebMessageAsJson(response.ToString(Formatting.None));
+                Addin.Trace("Bridge done: " + method + " success=" + result.Success);
+            }
+            catch (Exception ex)
+            {
+                Addin.Trace("Bridge handler failed: " + ex.GetType().Name + ": " + ex.Message);
             }
         }
 
