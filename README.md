@@ -33,9 +33,20 @@ npm run dev:addin     # UI 开发服务器：http://localhost:3001（代理 /api
 ```bash
 npm run build:prod        # TS + UI 构建
 npm run build:agent-exe   # esbuild + Node SEA → build/agent.exe
-npm run package           # 产出 dist/（agent.exe + OfficeAgent.Tray.exe + public/）
+npm run package           # 产出 dist/（agent.exe + 托盘 + public/ + com/）
 npm run smoke             # 安全与健康冒烟（token 鉴权 / CORS / 启动）
 ```
+
+## COM 加载项（WP2）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\register-com.ps1    # 注册（免管理员，自动识别 Office 位数）
+powershell -ExecutionPolicy Bypass -File scripts\unregister-com.ps1  # 注销
+```
+
+注册后重启 Word，「开始」选项卡出现 **Word Agent → 打开助手** 按钮，点击打开任务窗格（WebView2 加载 UI）。
+加载诊断日志：`%LOCALAPPDATA%\OfficeAgent\logs\com-host.log`。
+构建机器需要 `apps\com-host\lib\Extensibility.dll`（已随源码内置，仅编译期使用；类型内嵌，运行时无 PIA 依赖）。
 
 ## 安全模型（WP1）
 

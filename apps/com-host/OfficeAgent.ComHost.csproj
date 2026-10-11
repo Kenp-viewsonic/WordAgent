@@ -1,12 +1,37 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>OfficeAgent.ComHost</RootNamespace>
     <AssemblyName>OfficeAgent.ComHost</AssemblyName>
     <LangVersion>7.3</LangVersion>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Net.Http" />
+    <!-- IDTExtensibility2: vendored interop (build-time only — types are
+         embedded, so end users need no PIA at runtime). -->
+    <Reference Include="Extensibility, Version=7.0.3300.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
+      <HintPath>lib\Extensibility.dll</HintPath>
+      <EmbedInteropTypes>true</EmbedInteropTypes>
+    </Reference>
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\*.png" />
+  </ItemGroup>
+  <!-- .NET Framework does not flatten NuGet runtimes/ assets: put the
+       platform-matching WebView2Loader.dll next to the COM DLL (required for
+       P/Invoke resolution inside WINWORD.EXE). -->
+  <Target Name="CopyWebView2Loader" AfterTargets="Build">
+    <Copy
+      SourceFiles="$(OutputPath)runtimes\win-$(PlatformTarget)\native\WebView2Loader.dll"
+      DestinationFolder="$(OutputPath)"
+      SkipUnchangedFiles="true"
+      Condition="'$(PlatformTarget)' != '' And Exists('$(OutputPath)runtimes\win-$(PlatformTarget)\native\WebView2Loader.dll')" />
+  </Target>
 </Project>
