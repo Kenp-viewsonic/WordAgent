@@ -5,10 +5,11 @@ import path from "node:path";
 import mammoth from "mammoth";
 import { z } from "zod";
 import { createSession, getSession, appendToSession, deleteSession } from "./agent-session.js";
-import { callOpenAICompatible, describeDocumentStructure, listOpenAICompatibleModels, LlmHttpError, parseActionPlanFromToolCalls, streamOpenAICompatible, WORD_TOOLS } from "./llm.js";
+import { callOpenAICompatible, describeDocumentStructure, generateChatTitle, listOpenAICompatibleModels, LlmHttpError, parseActionPlanFromToolCalls, streamOpenAICompatible, WORD_TOOLS } from "./llm.js";
 import { executeTurn, buildAssistantMessage, detectDoomLoop, fingerprintToolCall, classifyToolCalls, TurnResult } from "./tool-runtime.js";
 import { keywordRetrieve, splitToChunks } from "./retrieval.js";
 import { appendChunks, clearAllChunks, deleteChunksByFile, getKbFileList, getKbStats, importChunks, loadChunks, loadProviderConfig, saveProviderConfig, loadPresets, savePreset, deletePreset } from "./store.js";
+import { getStatsSummary, recordToolEvents } from "./stats.js";
 import { ActionPlan, ChatMessage, DocumentStructure, ProviderConfig, ConfigPreset, RetrievalChunk } from "./types.js";
 import { logHttpRequest, logToolCall, logToolResult, logIterationEnd, logError } from "./agent-logger.js";
 import crypto from "node:crypto";
@@ -1299,6 +1300,53 @@ app.post("/v1/chat/agent-continue", async (req, res) => {
 \n`);
     return res.end();
   }
+});
+
+// ─── Batch A: usage statistics + auto session titles ────────────────────────
+
+app.get("/v1/stats", async (_req, res) => {
+  res.json(await getStatsSummary());
+});
+
+app.post("/v1/stats/report", async (req, res) => {
+  const schema = z.object({
+    events: z
+      .array(
+        z.object({
+          name: z.string().min(1).max(64),
+          success: z.boolean(),
+          ms: z.number().optional(),
+        })
+      )
+      .max(50),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "invalid_events" });
+    return;
+  }
+  recordToolEvents(parsed.data.events);
+  res.json({ ok: true });
+});
+
+app.post("/v1/chat/title", async (req, res) => {
+  const schema = z.object({ message: z.string().min(1).max(2000) });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "invalid_message" });
+    return;
+  }
+  const config = await loadProviderConfig();
+  if (!config) {
+    res.status(400).json({ error: "no_provider", message: "未配置模型供应商" });
+    return;
+  }
+  const title = await generateChatTitle(config, parsed.data.message);
+  if (!title) {
+    res.status(502).json({ error: "title_failed" });
+    return;
+  }
+  res.json({ title });
 });
 
 // SPA fallback: serve index.html for non-API routes, with the agent token

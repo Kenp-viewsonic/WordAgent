@@ -1,5 +1,6 @@
 import { ChatMessage, ProviderConfig, RetrievalChunk, ToolDefinition, ActionPlan, WordAction } from "./types.js";
 import { logRequestStart, logResponseRaw, logResponseParsed, logError } from "./agent-logger.js";
+import { recordLlmUsage } from "./stats.js";
 
 type ChatCompletionResponse = {
   choices?: Array<{
@@ -17,6 +18,7 @@ type ChatCompletionResponse = {
       }>;
     };
   }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
 };
 
 type StreamChunk = {
@@ -26,6 +28,7 @@ type StreamChunk = {
     text?: string;
     message?: { content?: string };
   }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
 };
 
 type ModelsResponse = {
@@ -884,7 +887,8 @@ function buildPayload(
   tools?: ToolDefinition[],
   insertMode?: string,
   documentStructureDescription?: string,
-  dynamicContext?: { documentContext?: string; selection?: string }
+  dynamicContext?: { documentContext?: string; selection?: string },
+  bare: boolean = false
 ): Record<string, any> {
   const contextText = contextChunks.map((chunk, idx) => `[${idx + 1}] ${chunk.fileName}: ${chunk.text}`).join("\n\n");
 
@@ -924,11 +928,20 @@ function buildPayload(
 
   const payload: Record<string, any> = {
     model: config.model,
-    messages: [systemPrompt, ...sanitized, trailingSystem],
+    // bare mode (title generation etc.): send the caller's messages untouched,
+    // without the assistant system prompt or trailing context boilerplate.
+    messages: bare ? sanitized : [systemPrompt, ...sanitized, trailingSystem],
     temperature: config.temperature ?? 0.2,
     max_tokens: config.maxTokens ?? 4096,
     stream,
   };
+
+  // Ask providers to report token usage on the final stream chunk (batch A
+  // stats). OpenAI-compatible APIs ignore unknown fields; usage arrives only
+  // when supported.
+  if (stream) {
+    payload.stream_options = { include_usage: true };
+  }
 
   if (hasTools) {
     payload.tools = tools;
@@ -1199,9 +1212,10 @@ export async function callOpenAICompatible(
   tools?: ToolDefinition[],
   insertMode?: string,
   documentStructureDescription?: string,
-  dynamicContext?: { documentContext?: string; selection?: string }
+  dynamicContext?: { documentContext?: string; selection?: string },
+  bare: boolean = false
 ): Promise<{ reply: string; actionPlan: ActionPlan | null; reasoningContent?: string; finishReason?: string; toolCalls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> }> {
-  const payload = buildPayload(config, messages, contextChunks, false, tools, insertMode, documentStructureDescription, dynamicContext);
+  const payload = buildPayload(config, messages, contextChunks, false, tools, insertMode, documentStructureDescription, dynamicContext, bare);
   const endpoint = getEndpoint(config);
   const timeoutMs = Number(process.env.LLM_TIMEOUT_MS ?? 180_000);
 
@@ -1262,6 +1276,9 @@ export async function callOpenAICompatible(
   const choice = data.choices?.[0];
   const message = choice?.message;
 
+  // Usage hook (batch A stats) — recorded even when the reply is empty.
+  if (data.usage) recordLlmUsage(data.usage.prompt_tokens, data.usage.completion_tokens);
+
   if (!message) {
     await logResponseParsed(traceId, { reply: "模型没有返回可用内容。", actionPlan: null });
     return { reply: "模型没有返回可用内容。", actionPlan: null };
@@ -1307,6 +1324,27 @@ export function isIterablePlan(plan: ActionPlan): boolean {
   ];
   const iterableTools = [...perceptionTools, ...iterableActionTools];
   return plan.actions.length > 0 && plan.actions.every((a) => iterableTools.includes(a.action));
+}
+
+/**
+ * Batch A: generate a short conversation title for the session dropdown.
+ * Best-effort — returns null on any failure so callers keep their truncation
+ * fallback.
+ */
+export async function generateChatTitle(config: ProviderConfig, userMessage: string): Promise<string | null> {
+  try {
+    const prompt = `为以下对话起一个不超过10个字的简洁标题，只输出标题本身（不要引号、标点或任何解释）：\n${userMessage.slice(0, 400)}`;
+    const result = await callOpenAICompatible(config, [{ role: "user", content: prompt }], [], undefined, undefined, undefined, undefined, true);
+    const title = (result.reply ?? "").trim();
+    if (!title) return null;
+    const cleaned = title
+      .replace(/^[\"'「『【]|["'」』】]$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    return cleaned ? cleaned.slice(0, 24) : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function streamOpenAICompatible(
@@ -1433,6 +1471,9 @@ export async function streamOpenAICompatible(
     const choice = data.choices?.[0];
     const message = choice?.message;
 
+    // Usage hook (batch A stats)
+    if (data.usage) recordLlmUsage(data.usage.prompt_tokens, data.usage.completion_tokens);
+
     if (!message) {
       await logResponseParsed(traceId, { reply: "模型没有返回可用内容。", actionPlan: null });
       return { reply: "模型没有返回可用内容。", actionPlan: null };
@@ -1511,6 +1552,11 @@ export async function streamOpenAICompatible(
       const choiceFinishReason = parsed.choices?.[0]?.finish_reason;
       if (choiceFinishReason) {
         lastFinishReason = choiceFinishReason;
+      }
+      // Usage hook (batch A stats) — providers with stream_options emit this
+      // on the final chunk.
+      if (parsed.usage) {
+        recordLlmUsage(parsed.usage.prompt_tokens, parsed.usage.completion_tokens);
       }
 
       const delta = parsed.choices?.[0]?.delta;

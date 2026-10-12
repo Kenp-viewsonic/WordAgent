@@ -52,12 +52,23 @@ type ActionPlan = {
   explanation: string;
 };
 
+type Checkpoint = {
+  id: string;
+  time: number;
+  label: string;
+  messages: ChatMessage[];
+  undoCount: number;
+  undone?: boolean;
+};
+
 type Session = {
   id: string;
   title: string;
   messages: ChatMessage[];
   createdAt: number;
   updatedAt: number;
+  titleGenerated?: boolean;
+  checkpoints?: Checkpoint[];
 };
 
 type InsertMode = "chat_only" | "smart_action" | "replace_selection" | "append_end";
@@ -3341,11 +3352,15 @@ async function executeSingleTool(
     description: `Agent Loop: ${tool.tool}`,
   };
 
+  const startedMs = Date.now();
   try {
     const result = await executeAction(action);
+    reportToolEvent(tool.tool, true, Date.now() - startedMs);
+    trackCheckpointUndo(tool.tool, tool.params, true);
     return { toolCallId: tool.id, toolName: tool.tool, result, success: true };
   } catch (error) {
     const { details } = stringifyOfficeError(error);
+    reportToolEvent(tool.tool, false, Date.now() - startedMs);
     return { toolCallId: tool.id, toolName: tool.tool, result: `错误: ${details}`, success: false };
   }
 }
@@ -3884,9 +3899,13 @@ async function sendMessage(): Promise<void> {
 
   // Store original user message in session
   const activeSession = getActiveSession()!;
+  // Batch A: snapshot the conversation before this send so the user can
+  // roll the round back (see renderCheckpointPanel).
+  addCheckpoint(activeSession, llmPrompt);
   activeSession.messages.push({ role: "user", content: llmPrompt });
   trimSessionMessages(activeSession);
   autoTitleFromFirstMessage(activeSession);
+  void generateSessionTitle(activeSession);
 
   setStatus(chatStatus, "思考中（流式返回）...");
 
@@ -4182,6 +4201,26 @@ function bindActions(): void {
   $("deleteSession").addEventListener("click", () => {
     deleteCurrentSession();
   });
+  $("checkpointBtn").addEventListener("click", () => {
+    renderCheckpointPanel();
+    checkpointPanel.style.display = checkpointPanel.style.display === "none" ? "" : "none";
+  });
+  $("checkpointClose").addEventListener("click", () => {
+    checkpointPanel.style.display = "none";
+  });
+  checkpointList.addEventListener("click", (e) => {
+    const target = (e.target as HTMLElement).closest("button") as HTMLButtonElement | null;
+    if (!target) return;
+    const id = target.dataset.id ?? "";
+    if (target.classList.contains("cp-undo")) {
+      void rollbackCheckpointUndo(id);
+    } else if (target.classList.contains("cp-restore")) {
+      restoreCheckpointMessages(id);
+    }
+  });
+  $("refreshStats").addEventListener("click", () => {
+    void loadStatsView();
+  });
 
   sessionSelect.addEventListener("change", () => {
     const selectedId = sessionSelect.value;
@@ -4189,6 +4228,200 @@ function bindActions(): void {
       switchToSession(selectedId);
     }
   });
+}
+
+// ─── Batch A: auto session titles ───────────────────────────────────────────
+
+/**
+ * Generates a short semantic title for the session dropdown (batch A).
+ * Best-effort and one-shot per session — the truncation fallback set by
+ * autoTitleFromFirstMessage stays when this fails or no provider is set.
+ */
+async function generateSessionTitle(session: Session): Promise<void> {
+  if (session.titleGenerated) return;
+  session.titleGenerated = true;
+  const firstUserMsg = session.messages.find((m) => m.role === "user");
+  if (!firstUserMsg) return;
+  try {
+    const res = await fetch(`${agentBase}/v1/chat/title`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: firstUserMsg.content.slice(0, 400) }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const title = typeof data?.title === "string" ? data.title.trim() : "";
+    if (title) {
+      session.title = title;
+      saveSessionsToStorage();
+      renderSessionSelect();
+    }
+  } catch {
+    // keep the truncation fallback title
+  }
+}
+
+// ─── Batch A: rollback checkpoints ─────────────────────────────────────────
+
+const checkpointPanel = $<HTMLDivElement>("checkpointPanel");
+const checkpointList = $<HTMLDivElement>("checkpointList");
+
+/** Tools that change the document (their execution maps to one undo step). */
+const UNDOABLE_TOOLS = new Set([
+  "insert_after_heading", "insert_at_cursor", "replace_selection", "insert_at_end",
+  "insert_at_start", "insert_after_paragraph", "delete_paragraph", "find_and_replace",
+  "find_and_replace_v2", "replace_paragraph", "set_paragraph_style", "merge_paragraphs",
+  "apply_rich_format", "delete_table", "insert_table", "insert_mermaid_image",
+]);
+
+function addCheckpoint(session: Session, userMessage: string): void {
+  const list = (session.checkpoints ??= []);
+  list.push({
+    id: generateSessionId(),
+    time: Date.now(),
+    label: userMessage.trim().slice(0, 40).replace(/\n/g, " ") || "（空消息）",
+    messages: JSON.parse(JSON.stringify(session.messages)) as ChatMessage[],
+    undoCount: 0,
+  });
+  while (list.length > 10) list.shift();
+  saveSessionsToStorage();
+}
+
+function trackCheckpointUndo(toolName: string, params: Record<string, any>, success: boolean): void {
+  if (!success) return;
+  const session = getActiveSession();
+  const cp = session?.checkpoints?.[session.checkpoints.length - 1];
+  if (!cp || cp.undone) return;
+  if (toolName === "undo_last_action") {
+    // Agent undid its own edits — fewer steps left to roll back.
+    cp.undoCount = Math.max(0, cp.undoCount - (Number(params?.count) || 1));
+    return;
+  }
+  if (UNDOABLE_TOOLS.has(toolName)) {
+    cp.undoCount += 1;
+    saveSessionsToStorage();
+  }
+}
+
+async function rollbackCheckpointUndo(cpId: string): Promise<void> {
+  const session = getActiveSession();
+  const cp = session?.checkpoints?.find((c) => c.id === cpId);
+  if (!cp || cp.undone || cp.undoCount <= 0) return;
+  setRunningState(true);
+  try {
+    await executeAction({ action: "undo_last_action", params: { count: cp.undoCount }, description: "回退检查点文档改动" });
+    cp.undone = true;
+    cp.undoCount = 0;
+    saveSessionsToStorage();
+    setStatus(chatStatus, "已撤销本轮 agent 的文档改动");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "未知错误";
+    setStatus(chatStatus, `撤销失败: ${message}`);
+  } finally {
+    setRunningState(false);
+    renderCheckpointPanel();
+  }
+}
+
+function restoreCheckpointMessages(cpId: string): void {
+  const session = getActiveSession();
+  const cp = session?.checkpoints?.find((c) => c.id === cpId);
+  if (!session || !cp) return;
+  session.messages = JSON.parse(JSON.stringify(cp.messages)) as ChatMessage[];
+  renderSessionMessages(session.messages);
+  saveSessionsToStorage();
+  checkpointPanel.style.display = "none";
+  setStatus(chatStatus, "已回到该检查点（对话已回退）");
+}
+
+function renderCheckpointPanel(): void {
+  const session = getActiveSession();
+  const list = session?.checkpoints ?? [];
+  if (list.length === 0) {
+    checkpointList.innerHTML = "<p class='status'>本次会话还没有检查点（发送一条消息后自动生成）。</p>";
+    return;
+  }
+  checkpointList.innerHTML = list
+    .slice()
+    .reverse()
+    .map((cp) => {
+      const time = new Date(cp.time).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+      const undoLabel = cp.undone ? "已撤销" : `${cp.undoCount} 处`;
+      const undoDisabled = cp.undone || cp.undoCount <= 0 ? "disabled" : "";
+      return `
+        <div class="checkpoint-item">
+          <div class="checkpoint-title">${escapeHTML(`${time} · ${cp.label}`)}</div>
+          <div class="checkpoint-actions">
+            <button class="secondary cp-undo" data-id="${cp.id}" ${undoDisabled}>撤销文档改动（${undoLabel}）</button>
+            <button class="secondary cp-restore" data-id="${cp.id}">回到发送前</button>
+          </div>
+        </div>`;
+    })
+    .join("");
+}
+
+// ─── Batch A: usage stats ──────────────────────────────────────────────────
+
+const statTodayTokens = $<HTMLSpanElement>("statTodayTokens");
+const statTotalTokens = $<HTMLSpanElement>("statTotalTokens");
+const statLlmCalls = $<HTMLSpanElement>("statLlmCalls");
+const statToolCalls = $<HTMLSpanElement>("statToolCalls");
+const statDetail = $<HTMLParagraphElement>("statDetail");
+const statToolList = $<HTMLDivElement>("statToolList");
+const accountInfo = $<HTMLParagraphElement>("accountInfo");
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+function reportToolEvent(name: string, success: boolean, ms: number): void {
+  void fetch(`${agentBase}/v1/stats/report`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ events: [{ name, success, ms }] }),
+  }).catch(() => {
+    // statistics must never break tool execution
+  });
+}
+
+async function loadStatsView(): Promise<void> {
+  try {
+    const res = await fetch(`${agentBase}/v1/stats`);
+    if (!res.ok) return;
+    const s = await res.json();
+    statTodayTokens.textContent = formatTokens((s.today?.promptTokens ?? 0) + (s.today?.completionTokens ?? 0));
+    statTotalTokens.textContent = formatTokens((s.total?.promptTokens ?? 0) + (s.total?.completionTokens ?? 0));
+    statLlmCalls.textContent = String(s.total?.llmCalls ?? 0);
+    statToolCalls.textContent = String(s.total?.toolCalls ?? 0);
+    statDetail.textContent =
+      `今日：入 ${formatTokens(s.today?.promptTokens ?? 0)} / 出 ${formatTokens(s.today?.completionTokens ?? 0)} tokens · 工具 ${s.today?.toolCalls ?? 0} 次` +
+      `；累计工具失败 ${s.total?.toolFailures ?? 0} 次`;
+
+    const ranking: Array<{ name: string; calls: number; avgMs: number }> = s.toolRanking ?? [];
+    statToolList.innerHTML =
+      ranking.length === 0
+        ? "<p class='status'>还没有工具调用记录。</p>"
+        : ranking
+            .map((t) => `<div class="tool-rank-row"><strong>${escapeHTML(t.name)}</strong><span>${t.calls} 次 · 均 ${t.avgMs}ms</span></div>`)
+            .join("");
+    void renderAccountInfo();
+  } catch {
+    // stats unavailable — leave the panel as-is
+  }
+}
+
+async function renderAccountInfo(): Promise<void> {
+  try {
+    const res = await fetch(`${agentBase}/v1/provider/config`);
+    if (!res.ok) return;
+    const cfg = await res.json();
+    accountInfo.textContent =
+      `当前模型：${cfg.model ?? "未配置"} · API Key ${cfg.hasApiKey ? "已配置（已隐藏）" : "未配置"} · 方案 ${cfg.presetCount ?? 0} 个`;
+  } catch {
+    accountInfo.textContent = "无法读取账户信息";
+  }
 }
 
 // ─── Initialize ──────────────────────────────────────────────────────────────
@@ -4211,6 +4444,7 @@ function initApp(): void {
   void loadPresets();
   void loadKbStats();
   void loadKbFileList();
+  void loadStatsView();
   setStatus(chatStatus, "就绪：可直接开始对话");
 }
 

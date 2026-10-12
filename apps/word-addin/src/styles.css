@@ -750,3 +750,68 @@ button:disabled {
   padding: 7px 18px;
   font-size: 13px;
 }
+
+/* ─── Batch A: usage stats + rollback checkpoints ─────────────────────────── */
+.stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+.stat-item {
+  background: rgba(127, 127, 127, 0.08);
+  border-radius: 0.55rem;
+  padding: 0.5rem 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.stat-label {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.stat-value {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+.tool-rank-list {
+  margin: 0.4rem 0 0.6rem;
+  font-size: 0.82rem;
+}
+.tool-rank-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.12rem 0;
+  color: var(--muted);
+}
+.tool-rank-row strong {
+  color: inherit;
+  font-weight: 500;
+}
+.checkpoint-panel {
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  border-radius: 0.6rem;
+  padding: 0.6rem 0.8rem;
+  margin: 0.5rem 0;
+}
+.checkpoint-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.35rem;
+}
+.checkpoint-item {
+  padding: 0.45rem 0;
+  border-top: 1px solid rgba(127, 127, 127, 0.2);
+}
+.checkpoint-title {
+  font-size: 0.85rem;
+  margin-bottom: 0.3rem;
+  word-break: break-all;
+}
+.checkpoint-actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}

@@ -101,6 +101,23 @@
         </section>
 
         <section class="subcard">
+          <h2>用量与账户</h2>
+          <div class="stats-grid">
+            <div class="stat-item"><span class="stat-label">今日 Tokens</span><span id="statTodayTokens" class="stat-value">—</span></div>
+            <div class="stat-item"><span class="stat-label">累计 Tokens</span><span id="statTotalTokens" class="stat-value">—</span></div>
+            <div class="stat-item"><span class="stat-label">LLM 调用</span><span id="statLlmCalls" class="stat-value">—</span></div>
+            <div class="stat-item"><span class="stat-label">工具调用</span><span id="statToolCalls" class="stat-value">—</span></div>
+          </div>
+          <p id="statDetail" class="status"></p>
+          <div id="statToolList" class="tool-rank-list"></div>
+          <p id="accountInfo" class="status"></p>
+          <div class="row actions">
+            <button id="refreshStats" class="secondary" type="button">刷新统计</button>
+            <button id="subscriptionLogin" class="secondary" type="button" disabled title="OAuth 订阅登录排期中">订阅登录（即将支持）</button>
+          </div>
+        </section>
+
+        <section class="subcard">
           <h2>知识库管理</h2>
           <input id="kbFile" type="file" />
           <div class="row actions">
@@ -138,6 +155,15 @@
         <div class="row actions">
           <button id="clearSession" class="secondary" type="button">清空当前会话</button>
           <button id="deleteSession" class="secondary danger" type="button">删除当前会话</button>
+          <button id="checkpointBtn" class="secondary" type="button" title="回退到之前的检查点">⏪ 回退</button>
+        </div>
+        <div id="checkpointPanel" class="checkpoint-panel" style="display:none;">
+          <div class="checkpoint-header">
+            <strong>回退检查点</strong>
+            <button id="checkpointClose" class="secondary icon-only" type="button">✕</button>
+          </div>
+          <p class="status">每次发送自动建立检查点。"撤销文档改动"基于 Word 撤销栈——若 agent 执行后你在文档中手动编辑过，请优先用"回到发送前"（仅回退对话）。</p>
+          <div id="checkpointList" class="checkpoint-list"></div>
         </div>
         <div id="chatLog" class="chatlog"></div>
         <div id="dropZone" class="drop-zone">

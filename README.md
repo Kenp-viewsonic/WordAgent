@@ -1,80 +1,142 @@
-# Office Agent Desktop
+﻿<div align="center">
+  <img src="apps/word-addin/public/icon-80.png" width="96" alt="Word Agent" />
+  <h1>Word Agent</h1>
+  <p><b>Windows 桌面 Word 本地智能体</b> — 让 AI 直接读懂、改写、整理你的文档</p>
+  <p>
+    <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?logo=windows11" alt="platform" />
+    <img src="https://img.shields.io/badge/Microsoft%20Word-2016%2B-2B579A?logo=microsoftword" alt="word" />
+    <img src="https://img.shields.io/badge/.NET%20Framework-4.8-512BD4?logo=dotnet" alt="dotnet" />
+    <img src="https://img.shields.io/badge/Node.js-SEA%20打包-339933?logo=nodedotjs" alt="node" />
+    <img src="https://img.shields.io/badge/阶段-Beta%20可分发测试-orange" alt="stage" />
+    <img src="https://img.shields.io/badge/license-TBD-lightgrey" alt="license" />
+  </p>
+</div>
 
-> 重构进行中：决策记录、现状清点与工作包分解见 [plans/com-shell-migration-kickoff.md](plans/com-shell-migration-kickoff.md)（唯一信息入口）。
+---
 
-Windows 桌面版 Word 本地 Agent：C# COM 薄壳加载项 + WebView2 任务窗格 + 托盘常驻本地服务（agent.exe）。
+## ✨ 为什么选 Word Agent
 
-## 目录结构
+|  |  |
+|---|---|
+| 🚀 **一键安装，随 Word 启动** | 纯 COM 加载项注册（非 Web Add-in 侧载），`Install.exe` 装完重启 Word 即出按钮 —— 无信任中心配置、无 Node 环境、无黑色命令行窗口 |
+| 🤖 **真正的文档操作** | 24 个文档工具：读写段落、查找替换、样式排版、表格增删改、流程图插入……全部运行在 Word 对象模型上，带撤销合并（一次 Ctrl+Z 回滚一整步） |
+| 🛩️ **Autopilot 多步执行** | 勾选 Autopilot 后连贯执行多轮任务不打断；每次发送自动建立 ⏪ 检查点，一键撤销本轮文档改动 / 回到发送前 |
+| 📚 **本地知识库** | 上传文档建立检索库，回答带来源引用；支持存档导出 / 导入 |
+| 🔒 **本地优先，安全加固** | 服务只绑定 `127.0.0.1`，全部 API 要求随机 token 鉴权，CORS 白名单 —— 恶意网页无法读取你的知识库与配置 |
+| 📊 **用量与账户面板** | Token 消耗、工具调用排行、失败率一目了然；模型配置（BYOK）与预设方案集中管理 |
+| 🧩 **自带你的模型** | OpenAI 兼容接口任意接入：OpenAI / DeepSeek / 通义 / Kimi / Ollama 本地模型……API Key 只存本机 |
 
-| 路径 | 说明 |
-|------|------|
-| `apps/word-addin` | TS UI（聊天/知识库/预设），由 agent.exe 托管，WebView2 中加载 |
-| `apps/local-agent` | 本地 Agent 服务（Express），打包为 `agent.exe` |
-| `apps/com-host` | C# .NET Framework 4.8 COM 加载项（WP2/WP3） |
-| `apps/tray` | C# WinForms 托盘壳（单实例/自启/服务守护） |
-| `installer/` | Inno Setup 安装器（WP4） |
-| `scripts/` | 打包与冒烟脚本 |
-| `plans/` | 计划与历史文档 |
+## 🚀 快速开始
 
-`officeAgent/` 仅为历史参考（旧 Web Add-in 线），不参与构建、不入库。
+**普通用户**
 
-## 开发
+1. 下载 [`OfficeAgent-Setup-<版本>.exe`](dist-setup/)（发布页获取）
+2. 双击安装（可选"所有用户 / 仅当前用户"，无需管理员亦可）
+3. 打开 Word → 「开始」选项卡 → **Word Agent → 打开助手**
+4. 在面板右上角 ⚙️ 配置模型供应商（Base URL + API Key + 模型）→ 开始对话
+
+> 安装/卸载前请完全退出 Word；首次使用需安装 [WebView2 运行时](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)（安装器会自动检测并引导，Win10/11 一般自带）。
+
+**开发者**
 
 ```bash
-npm install
-npm run dev:agent     # 本地 Agent：http://127.0.0.1:8787
-npm run dev:addin     # UI 开发服务器：http://localhost:3001（代理 /api → 8787）
-```
+npm install               # 安装依赖
+npm run dev:agent         # 本地 Agent：http://127.0.0.1:8787
+npm run dev:addin         # UI 开发服务器：http://localhost:3001
 
-先启动 `dev:agent`（生成 token 文件）再启动 `dev:addin`。数据与 token 存于 `%LOCALAPPDATA%\OfficeAgent\`。
-
-## 构建 / 打包 / 冒烟
-
-```bash
-npm run build:prod        # TS + UI 构建
-npm run build:agent-exe   # esbuild + Node SEA → build/agent.exe
-npm run package           # 产出 dist/ 并编译安装器 → dist-setup/
-npm run build:installer   # 仅编译安装器（Inno Setup 6，winget install JRSoftware.InnoSetup）
-npm run smoke             # 安全与健康冒烟（token 鉴权 / CORS / 启动）
+npm run package           # 构建 dist/ 并编译安装器 → dist-setup/
+npm run smoke             # 安全冒烟（token 鉴权 / CORS / 启动）
 npm run test:tools        # 24 文档工具回归（真实 Word 实例，34 用例）
 ```
 
-## 分发安装（WP4）
-
-`dist-setup\OfficeAgent-Setup-<版本>.exe` 即为可分发测试的安装包：
-
-- 双击安装，可选**所有用户**（Program Files + HKLM 注册，需管理员）或**仅当前用户**（%LOCALAPPDATA%\Programs + HKCU 注册，免管理员）
-- 自动注册 COM（32/64 位注册表视图双写，兼容 32/64 位 Office）、写开机自启、开始菜单/桌面快捷方式
-- 检测 WebView2 运行时并引导安装；**安装/卸载前需完全退出 Word**（安装器会提示）
-- 卸载零残留（COM 注册、自启键、快捷方式全清）；用户数据（配置/知识库）可选保留
-
-构建机器需要 Inno Setup 6（`winget install JRSoftware.InnoSetup`）。
-
-## COM 加载项（WP2）
+COM 加载项开发调试：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\register-com.ps1    # 注册（免管理员，自动识别 Office 位数）
+powershell -ExecutionPolicy Bypass -File scripts\register-com.ps1    # 注册（免管理员）
 powershell -ExecutionPolicy Bypass -File scripts\unregister-com.ps1  # 注销
 ```
 
-注册后重启 Word，「开始」选项卡出现 **Word Agent → 打开助手** 按钮，点击打开任务窗格（WebView2 加载 UI）。
-加载诊断日志：`%LOCALAPPDATA%\OfficeAgent\logs\com-host.log`。
-构建机器需要 `apps\com-host\lib\Extensibility.dll`（已随源码内置，仅编译期使用；类型内嵌，运行时无 PIA 依赖）。
+## 🏗️ 架构
 
-## 端到端验收清单（WP2）
+```mermaid
+graph TB
+    subgraph WINWORD.EXE
+        COM["COM 薄壳加载项<br/>Ribbon 按钮 + 任务窗格<br/>LoadBehavior=3 自动加载"]
+        OM["Word 对象模型执行器<br/>24 个文档工具 + 撤销合并"]
+    end
+    subgraph TRAY["托盘常驻"]
+        API["Agent API (127.0.0.1:8787)<br/>聊天 / Agent Loop / 知识库 / 用量统计<br/>token 鉴权 + CORS 白名单"]
+    end
+    UI["TS UI（聊天 / 知识库 / 检查点 / 用量）<br/>WebView2 加载"]
+    COM -- Ribbon 点击 --> UI
+    UI -- "fetch + SSE（X-Agent-Token）" --> API
+    UI -- "文档工具 ⇄ WebView2 桥" --> OM
+    COM -. "HKCU Run 开机自启" .- TRAY
+    MODEL["任意 OpenAI 兼容模型"] <-- API
+```
 
-1. 关闭所有 Word 窗口后重新打开，新建空白文档
-2. 「开始」选项卡右侧出现 **Word Agent** 分组与 **打开助手** 按钮（无任何信任中心配置）
-3. 点击按钮 → 右侧任务窗格打开：首次自动拉起托盘（右下角图标）→ 服务就绪 → 加载 UI
-4. 发一条聊天消息（provider 配置在 `%LOCALAPPDATA%\OfficeAgent\data`，流式回复正常）
-5. 知识库面板可上传/查看/删除文件
-6. **预期不可用**：文档修改类工具（WP3 迁移中），调用会提示不在 Word 宿主/工具失败
+- **agent.exe**：esbuild + Node SEA 打包的独立服务，零 Node 依赖
+- **OfficeAgent.Tray.exe**：C# WinForms 托盘壳（单实例 / 自启 / 服务守护 / 端口处置）
+- **OfficeAgent.ComHost.dll**：C# .NET Framework 4.8 COM 加载项（双位数注册，兼容 32/64 位 Office）
 
-排查：按钮缺失 → 重新运行 `register-com.ps1`，或 文件→选项→加载项→管理:禁用项目 中恢复；
-面板异常 → 看 `%LOCALAPPDATA%\OfficeAgent\logs\com-host.log`。改代码重新构建前先关闭 Word（DLL 被占用）。
+## 🗺️ 路线图
 
-## 安全模型（WP1）
+| 里程碑 | 内容 | 状态 |
+|--------|------|------|
+| M0 · 仓库骨架 | 资产迁移、构建链 | ✅ |
+| M1 · 安全加固 + 托盘化 | token 鉴权 / CORS / agent.exe / 托盘 | ✅ |
+| M2 · COM 薄壳 | Ribbon + WebView2 任务窗格 + 注册 | ✅ |
+| M3 · 工具层迁移 | 24 工具 Word OM 化 + 34 用例回归 | ✅ |
+| M4 · 统一安装器 | Inno Setup 双模式安装 / 零残留卸载 | ✅ |
+| **批次 A · 体验包** | 自动标题 / 检查点回退 / 用量面板 | ✅ |
+| 批次 B · 能力包 | 文档截图自检 / 调试 CLI / 联网搜索 | 🔜 |
+| 批次 C · 生态包 | 订阅登录 / Skills / OOXML / VFS | 📋 |
+| M5 · 验证矩阵 | 多版本 Office × 位数 × 系统覆盖 | 📋 |
 
-- `/v1/*` 全部要求 `X-Agent-Token` 请求头（`/health` 除外，供托盘探活）
-- token 于服务启动时生成并存 `%LOCALAPPDATA%\OfficeAgent\agent.token`
-- CORS 固定白名单（`AGENT_CORS_ORIGINS` 可扩展），不反射任意 Origin
+## 🔐 安全模型
+
+- 服务仅监听 `127.0.0.1`，所有 `/v1/*` 需 `X-Agent-Token`（启动时随机生成，文件 ACL 收紧至当前用户）
+- CORS 固定白名单，绝不反射任意 Origin —— 恶意网页无法读取知识库 / 消耗额度
+- 模型 API Key 仅存本机 `%LOCALAPPDATA%\OfficeAgent\`，面板中脱敏显示
+- 卸载零残留（COM 注册 / 自启键 / 快捷方式全清），用户数据可选保留
+
+## 🧑‍💻 开发指南
+
+<details>
+<summary>目录结构</summary>
+
+```
+apps/
+├── word-addin/    # TS UI（聊天/知识库/检查点/用量），WebView2 加载
+├── local-agent/   # Express 服务 → 打包为 agent.exe
+├── com-host/      # C# COM 加载项（Ribbon + WebView2 桥 + Word OM 执行器）
+└── tray/          # C# WinForms 托盘壳
+installer/         # Inno Setup 安装器脚本
+scripts/           # 打包 / 冒烟 / 工具回归 / COM 注册
+plans/             # 设计文档与历史记录
+```
+</details>
+
+<details>
+<summary>测试与验证</summary>
+
+- `npm run smoke`：服务健康 + token 鉴权 + CORS 冒烟
+- `npm run test:tools`：真实 Word 实例驱动 24 个文档工具（34 用例，含空文档 / 中文 / 表格 / 流程图 / 大文档性能）
+- 诊断日志：`%LOCALAPPDATA%\OfficeAgent\logs\com-host.log`（COM 生命周期 + 桥调用耗时）、`data\agent-trace.jsonl`（Agent 全链路）
+
+</details>
+
+## 🙏 致谢
+
+- [office-agents](https://github.com/hewliyang/office-agents) — 文档截图自检、调试桥等特性的灵感来源
+- [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) · [Inno Setup](https://jrsoftware.org/isinfo.php) · [esbuild](https://esbuild.github.io/)
+
+## 📄 License
+
+开源协议待定（计划采用 MIT）。
+
+---
+
+<div align="center">
+  <sub>Built with ❤️ for Word power users · Issues / PR 欢迎</sub>
+</div>
