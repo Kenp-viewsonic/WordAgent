@@ -60,19 +60,21 @@ powershell -ExecutionPolicy Bypass -File scripts\unregister-com.ps1  # 注销
 
 ```mermaid
 graph TB
-    subgraph WINWORD.EXE
-        COM["COM 薄壳加载项<br/>Ribbon 按钮 + 任务窗格<br/>LoadBehavior=3 自动加载"]
+    subgraph WORD["WINWORD.EXE 进程"]
+        COM["COM 薄壳加载项<br/>Ribbon 按钮 + 任务窗格 · LoadBehavior=3"]
         OM["Word 对象模型执行器<br/>24 个文档工具 + 撤销合并"]
     end
     subgraph TRAY["托盘常驻"]
-        API["Agent API (127.0.0.1:8787)<br/>聊天 / Agent Loop / 知识库 / 用量统计<br/>token 鉴权 + CORS 白名单"]
+        API["Agent API 127.0.0.1:8787<br/>聊天 / Agent Loop / 知识库 / 用量统计<br/>token 鉴权 + CORS 白名单"]
     end
-    UI["TS UI（聊天 / 知识库 / 检查点 / 用量）<br/>WebView2 加载"]
-    COM -- Ribbon 点击 --> UI
-    UI -- "fetch + SSE（X-Agent-Token）" --> API
-    UI -- "文档工具 ⇄ WebView2 桥" --> OM
-    COM -. "HKCU Run 开机自启" .- TRAY
-    MODEL["任意 OpenAI 兼容模型"] <-- API
+    UI["TS UI · WebView2 加载<br/>聊天 / 知识库 / 检查点 / 用量"]
+    MODEL["任意 OpenAI 兼容模型"]
+    COM -->|"Ribbon 点击"| UI
+    UI -->|"fetch + SSE（X-Agent-Token）"| API
+    UI -->|"文档工具（WebView2 桥）"| OM
+    OM -->|"执行结果"| UI
+    API --> MODEL
+    COM -.->|"HKCU Run 开机自启"| TRAY
 ```
 
 - **agent.exe**：esbuild + Node SEA 打包的独立服务，零 Node 依赖
