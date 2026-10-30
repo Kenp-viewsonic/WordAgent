@@ -164,6 +164,13 @@ function setRunningState(running: boolean): void {
     currentAbortController = null;
   }
 }
+
+/** Grow the composer with its content, up to the CSS max-height (168px). */
+function resizeComposerInput(): void {
+  userInput.style.height = "auto";
+  const next = Math.min(userInput.scrollHeight, 168);
+  userInput.style.height = `${Math.max(next, 42)}px`;
+}
 const attachBtn = $<HTMLButtonElement>("attachBtn");
 const dropZone = $<HTMLDivElement>("dropZone");
 const dropOverlay = $<HTMLDivElement>("dropOverlay");
@@ -389,48 +396,140 @@ function renderContentToHTML(content: string): string {
 }
 
 /**
- * Render a subset of Markdown to HTML. Inline-safe: runs after HTML escaping.
- * Supports: **bold**, *italic*, `code`, ```code blocks```, - lists, ### headings.
+ * Inline Markdown for a single line/paragraph. Input is already HTML-escaped.
+ * Code spans are pulled out first so their contents are not styled as bold or
+ * italic by the later passes.
+ */
+function renderInlineMarkdown(text: string): string {
+  const codeSpans: string[] = [];
+  let out = text.replace(/`([^`\n]+)`/g, (_m, code: string) => {
+    const token = `\u0001${codeSpans.length}\u0001`;
+    codeSpans.push(`<code>${code}</code>`);
+    return token;
+  });
+
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
+  out = out.replace(/(^|[^*\w])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  out = out.replace(/(^|[^_\w])_([^_\n]+)_/g, "$1<em>$2</em>");
+  out = out.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
+
+  return out.replace(/\u0001(\d+)\u0001/g, (_m, index: string) => codeSpans[Number(index)] ?? "");
+}
+
+/**
+ * Render a subset of Markdown to block-level HTML: paragraphs, headings,
+ * fenced code, ordered/unordered lists, blockquotes and inline emphasis.
+ *
+ * The previous implementation substituted `<br><br>` for blank lines, which
+ * produced large gaps around headings/lists and left bare `<li>` elements
+ * outside a list. Rendering line-by-line also behaves better while an answer
+ * is still streaming (an unterminated fence is flushed as code at the end).
  */
 function renderMarkdown(text: string): string {
-  // First escape HTML
-  let out = escapeHTML(text);
+  const lines = escapeHTML(text).replace(/\r\n?/g, "\n").split("\n");
+  const out: string[] = [];
+  let paragraph: string[] = [];
+  let listTag: "ul" | "ol" | null = null;
+  let inFence = false;
+  let fenceLang = "";
+  let fenceLines: string[] = [];
 
-  // Fenced code blocks (before inline code to avoid conflict)
-  out = out.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, lang, code) => {
-    return `<pre><code>${code.trimEnd()}</code></pre>`;
-  });
+  const flushParagraph = (): void => {
+    if (paragraph.length > 0) {
+      out.push(`<p>${paragraph.join("<br>")}</p>`);
+      paragraph = [];
+    }
+  };
 
-  // Inline code: `...` (single backtick pairs)
-  out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
+  const closeList = (): void => {
+    if (listTag) {
+      out.push(`</${listTag}>`);
+      listTag = null;
+    }
+  };
 
-  // Bold: **...** or __...__
-  out = out.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  out = out.replace(/__(.+?)__/g, "<strong>$1</strong>");
+  for (const line of lines) {
+    const fence = line.match(/^```([\w+-]*)\s*$/);
+    if (fence) {
+      if (!inFence) {
+        flushParagraph();
+        closeList();
+        inFence = true;
+        fenceLang = fence[1];
+        fenceLines = [];
+      } else {
+        const langClass = fenceLang ? ` class="language-${fenceLang}"` : "";
+        out.push(`<pre><code${langClass}>${fenceLines.join("\n")}</code></pre>`);
+        inFence = false;
+        fenceLang = "";
+        fenceLines = [];
+      }
+      continue;
+    }
 
-  // Italic: *...* or _..._
-  out = out.replace(/\*(.+?)\*/g, "<em>$1</em>");
-  out = out.replace(/_(.+?)_/g, "<em>$1</em>");
+    if (inFence) {
+      fenceLines.push(line);
+      continue;
+    }
 
-  // Headings: ### text at line start
-  out = out.replace(/^### (.+)$/gm, "<h4>$1</h4>");
-  out = out.replace(/^## (.+)$/gm, "<h3>$1</h3>");
-  out = out.replace(/^# (.+)$/gm, "<h2>$1</h2>");
+    if (line.trim() === "") {
+      flushParagraph();
+      closeList();
+      continue;
+    }
 
-  // Unordered list: - item or * item at line start
-  out = out.replace(/^[*-] (.+)$/gm, "<li>$1</li>");
-  // Wrap consecutive <li> in <ul>
-  out = out.replace(/(<li>[\s\S]*?<\/li>)/g, (_m, items) => {
-    if (!items.includes("\n<li>")) return _m;
-    return `<ul>${items.replace(/\n/g, "")}</ul>`;
-  });
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      closeList();
+      const level = heading[1].length >= 3 ? 4 : heading[1].length + 1;
+      out.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
 
-  // Line breaks: double newline → paragraph break
-  out = out.replace(/\n\n+/g, "<br><br>");
-  // Single newline → <br>
-  out = out.replace(/\n/g, "<br>");
+    // ">" was escaped to "&gt;" above.
+    const quote = line.match(/^&gt;\s?(.*)$/);
+    if (quote) {
+      flushParagraph();
+      closeList();
+      out.push(`<blockquote><p>${renderInlineMarkdown(quote[1])}</p></blockquote>`);
+      continue;
+    }
 
-  return out;
+    const bullet = line.match(/^\s*[-*+]\s+(.+)$/);
+    if (bullet) {
+      flushParagraph();
+      if (listTag !== "ul") {
+        closeList();
+        out.push("<ul>");
+        listTag = "ul";
+      }
+      out.push(`<li>${renderInlineMarkdown(bullet[1])}</li>`);
+      continue;
+    }
+
+    const numbered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (numbered) {
+      flushParagraph();
+      if (listTag !== "ol") {
+        closeList();
+        out.push("<ol>");
+        listTag = "ol";
+      }
+      out.push(`<li>${renderInlineMarkdown(numbered[1])}</li>`);
+      continue;
+    }
+
+    paragraph.push(renderInlineMarkdown(line));
+  }
+
+  if (inFence) {
+    out.push(`<pre><code>${fenceLines.join("\n")}</code></pre>`);
+  }
+  flushParagraph();
+  closeList();
+  return out.join("");
 }
 
 function escapeHTML(text: string): string {
@@ -440,11 +539,25 @@ function escapeHTML(text: string): string {
     .replace(/>/g, "&gt;");
 }
 
+/**
+ * Builds the inner markup shared by all chat bubbles: a small meta row
+ * (avatar + role) and the rich body. Keeping this in one place means the
+ * streaming update path and the history replay path render identically.
+ */
+function messageInner(role: "user" | "assistant" | "system", bodyHtml: string): string {
+  const label = role === "user" ? "你" : role === "assistant" ? "助手" : "系统";
+  const avatar = role === "user" ? "你" : "✦";
+  return (
+    `<div class="msg-meta"><span class="msg-avatar" aria-hidden="true">${avatar}</span>` +
+    `<span class="msg-role">${label}</span></div>` +
+    `<div class="msg-body">${bodyHtml}</div>`
+  );
+}
+
 function appendMessage(role: "user" | "assistant" | "system", content: string): void {
   const div = document.createElement("div");
   div.className = `msg ${role}`;
-  const label = role === "user" ? "你" : role === "assistant" ? "助手" : "系统";
-  div.innerHTML = `${label}: ${renderContentToHTML(content)}`;
+  div.innerHTML = messageInner(role, renderContentToHTML(content));
   chatLog.appendChild(div);
   chatLog.scrollTop = chatLog.scrollHeight;
 }
@@ -454,7 +567,9 @@ function appendToolCallCard(toolName: string, params: Record<string, any>): void
   div.className = "msg tool-call";
   const paramStr = JSON.stringify(params, null, 0);
   const shortName = toolName.replace(/_/g, " ");
-  div.innerHTML = `<div class="tc-header">🔧 调用: ${escapeHtml(shortName)}</div><div class="tc-params">${escapeHtml(paramStr.length > 300 ? paramStr.slice(0, 300) + "…" : paramStr)}</div>`;
+  div.innerHTML =
+    `<div class="tc-header">调用 · ${escapeHtml(shortName)}</div>` +
+    `<div class="tc-params">${escapeHtml(paramStr.length > 300 ? paramStr.slice(0, 300) + "…" : paramStr)}</div>`;
   chatLog.appendChild(div);
   chatLog.scrollTop = chatLog.scrollHeight;
 }
@@ -463,9 +578,10 @@ function appendToolResultCard(toolName: string, success: boolean, result: string
   const div = document.createElement("div");
   div.className = `msg tool-result ${success ? "tr-ok" : "tr-fail"}`;
   const shortName = toolName.replace(/_/g, " ");
-  const icon = success ? "✅" : "❌";
   const body = result.length > 400 ? result.slice(0, 400) + "…" : result;
-  div.innerHTML = `<div class="tr-header">${icon} ${escapeHtml(shortName)}</div><div class="tr-body">${escapeHtml(body)}</div>`;
+  div.innerHTML =
+    `<div class="tr-header">${success ? "完成" : "失败"} · ${escapeHtml(shortName)}</div>` +
+    `<div class="tr-body">${escapeHtml(body)}</div>`;
   chatLog.appendChild(div);
   chatLog.scrollTop = chatLog.scrollHeight;
 }
@@ -473,15 +589,30 @@ function appendToolResultCard(toolName: string, success: boolean, result: string
 function createAssistantMessage(initial = ""): HTMLDivElement {
   const div = document.createElement("div");
   div.className = "msg assistant";
-  div.innerHTML = `助手: ${initial ? renderContentToHTML(initial) : ""}`;
+  const body = initial
+    ? renderContentToHTML(initial)
+    : `<div class="typing" aria-label="正在生成"><span></span><span></span><span></span></div>`;
+  div.innerHTML = messageInner("assistant", body);
   chatLog.appendChild(div);
   chatLog.scrollTop = chatLog.scrollHeight;
   return div;
 }
 
 function updateAssistantMessage(el: HTMLDivElement, content: string): void {
-  el.innerHTML = `助手: ${renderContentToHTML(content)}`;
+  const body = el.querySelector<HTMLDivElement>(".msg-body");
+  if (body) {
+    body.innerHTML = renderContentToHTML(content);
+  } else {
+    el.innerHTML = messageInner("assistant", renderContentToHTML(content));
+  }
   // Don't auto-scroll during streaming to avoid jitter (user may be reading above)
+}
+
+/** Drop an assistant bubble that never received content (abort/transport error). */
+function removeTypingBubbles(): void {
+  chatLog.querySelectorAll<HTMLDivElement>(".msg.assistant").forEach((el) => {
+    if (el.querySelector(".typing")) el.remove();
+  });
 }
 
 function clearChatLog(): void {
@@ -533,8 +664,7 @@ function loadOlderMessages(visible: ChatMessage[], currentStart: number): void {
     const msg = visible[i];
     const div = document.createElement("div");
     div.className = `msg ${msg.role}`;
-    const label = msg.role === "user" ? "你" : msg.role === "assistant" ? "助手" : "系统";
-    div.innerHTML = `${label}: ${renderContentToHTML(msg.content)}`;
+    div.innerHTML = messageInner(msg.role, renderContentToHTML(msg.content));
     fragment.appendChild(div);
   }
 
@@ -754,11 +884,20 @@ async function loadKbStats(): Promise<void> {
     }
 
     const data = (await res.json()) as KbStatsResponse;
-    const latest = data.files.slice(-5).join("，");
+    const latest = (Array.isArray(data.files) ? data.files : []).slice(-5).join("，");
     kbMeta.textContent = `知识库：${data.fileCount} 个文件 / ${data.chunkCount} 个分块${latest ? `。最近文件：${latest}` : ""}`;
   } catch {
     kbMeta.textContent = "知识库状态读取失败（本地 Agent 不可达）";
   }
+}
+
+/** Reflect the chosen knowledge-base file in the custom picker label. */
+function syncKbFileLabel(): void {
+  const input = $<HTMLInputElement>("kbFile");
+  const picker = input.closest(".file-picker");
+  const file = input.files?.[0];
+  $("kbFileLabel").textContent = file ? file.name : "选择要索引的文档";
+  picker?.classList.toggle("has-file", Boolean(file));
 }
 
 async function loadKbFileList(): Promise<void> {
@@ -956,6 +1095,7 @@ async function uploadKnowledgeFile(): Promise<void> {
     const data = (await res.json()) as { chunkCount: number; fileName: string };
     setStatus(kbStatus, `已索引 ${data.fileName}，分块 ${data.chunkCount}`);
     input.value = "";
+    syncKbFileLabel();
     await loadKbStats();
     await loadKbFileList();
   } catch (error) {
@@ -3877,6 +4017,7 @@ async function sendMessage(): Promise<void> {
   }
 
   userInput.value = "";
+  resizeComposerInput();
 
   // Build display message (with attachment indicator)
   let displayText = text;
@@ -4006,6 +4147,7 @@ async function sendMessage(): Promise<void> {
       setStatus(chatStatus, `请求失败: 无法连接本地 Agent (${message})`);
     }
   } finally {
+    removeTypingBubbles();
     setRunningState(false);
   }
 }
@@ -4076,6 +4218,8 @@ function bindActions(): void {
     void uploadKnowledgeFile();
   });
 
+  $("kbFile").addEventListener("change", syncKbFileLabel);
+
   $("refreshKb").addEventListener("click", () => {
     void loadKbStats();
     void loadKbFileList();
@@ -4111,6 +4255,13 @@ function bindActions(): void {
   sidebarClose.addEventListener("click", closeSidebar);
   overlay.addEventListener("click", closeSidebar);
 
+  // Esc closes the settings sheet (matches most island/sheet UIs).
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && sidebar.classList.contains("open")) {
+      closeSidebar();
+    }
+  });
+
   // Chat
   $("sendMsg").addEventListener("click", () => {
     void sendMessage();
@@ -4121,6 +4272,15 @@ function bindActions(): void {
     void stopAgentRun();
   });
 
+  // Empty-state starter chips prefill the composer (never auto-send).
+  document.querySelectorAll<HTMLButtonElement>(".starter").forEach((starter) => {
+    starter.addEventListener("click", () => {
+      userInput.value = starter.dataset.prompt ?? "";
+      resizeComposerInput();
+      userInput.focus();
+    });
+  });
+
   // Allow Enter to send (Shift+Enter for newline)
   userInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -4128,6 +4288,9 @@ function bindActions(): void {
       void sendMessage();
     }
   });
+
+  // Composer grows with the draft, up to the CSS max-height.
+  userInput.addEventListener("input", resizeComposerInput);
 
   // Insert actions
   $("retryLast").addEventListener("click", () => {
@@ -4446,6 +4609,7 @@ function initApp(): void {
   void loadKbFileList();
   void loadStatsView();
   setStatus(chatStatus, "就绪：可直接开始对话");
+  resizeComposerInput();
 }
 
 // Boot shim: the legacy Office.js host waits for Office.onReady; the desktop
