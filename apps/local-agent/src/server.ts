@@ -10,7 +10,7 @@ import { executeTurn, buildAssistantMessage, detectDoomLoop, fingerprintToolCall
 import { keywordRetrieve, splitToChunks } from "./retrieval.js";
 import { appendChunks, clearAllChunks, deleteChunksByFile, getKbFileList, getKbStats, importChunks, loadChunks, loadProviderConfig, saveProviderConfig, loadPresets, savePreset, deletePreset } from "./store.js";
 import { getStatsSummary, recordToolEvents } from "./stats.js";
-import { ActionPlan, ChatMessage, DocumentStructure, ProviderConfig, ConfigPreset, RetrievalChunk } from "./types.js";
+import { ActionPlan, ChatMessage, DocumentStructure, LlmUsage, ProviderConfig, ConfigPreset, RetrievalChunk } from "./types.js";
 import { logHttpRequest, logToolCall, logToolResult, logIterationEnd, logError } from "./agent-logger.js";
 import crypto from "node:crypto";
 import os from "node:os";
@@ -169,6 +169,7 @@ const configSchema = z.object({
   thinkingEffort: z.enum(["medium", "high"]).optional(),
   thinkingFormat: z.enum(["deepseek", "openai"]).optional(),
   maxIterations: z.number().int().min(1).max(50).optional(),
+  contextWindow: z.number().int().positive().max(10_000_000).optional(),
 });
 
 app.post("/v1/provider/config", async (req, res) => {
@@ -212,6 +213,7 @@ app.get("/v1/provider/config", async (_req, res) => {
     thinkingEffort: config.thinkingEffort ?? "high",
     thinkingFormat: config.thinkingFormat ?? "deepseek",
     maxIterations: config.maxIterations ?? 10,
+    contextWindow: config.contextWindow,
   });
 });
 
@@ -233,6 +235,7 @@ const presetSchema = z.object({
     thinkingEffort: z.enum(["medium", "high"]).optional(),
     thinkingFormat: z.enum(["deepseek", "openai"]).optional(),
     maxIterations: z.number().int().min(1).max(50).optional(),
+    contextWindow: z.number().int().positive().max(10_000_000).optional(),
   }),
 });
 
@@ -553,7 +556,7 @@ app.post("/v1/chat/stream", async (req, res) => {
     // Send an immediate event to confirm stream startup to the client.
     res.write(`data: ${JSON.stringify({ type: "start", ts: Date.now() })}\n\n`);
 
-    let result: { reply: string; actionPlan: ActionPlan | null };
+    let result: { reply: string; actionPlan: ActionPlan | null; usage?: LlmUsage };
     try {
       result = await streamOpenAICompatible(
         provider,
@@ -580,6 +583,17 @@ app.post("/v1/chat/stream", async (req, res) => {
       // Fall back to non-stream completion so client can still receive a final answer.
       result = await callOpenAICompatible(provider, enrichedMessages, retrieved, WORD_TOOLS, insertMode, documentStructureDescription, dynamicContext);
       res.write(`data: ${JSON.stringify({ type: "fallback", reason: "no_stream_delta" })}\n\n`);
+    }
+
+    // Context ring: surface usage to the frontend.
+    if (result.usage) {
+      res.write(`data: ${JSON.stringify({
+        type: "usage",
+        promptTokens: result.usage.promptTokens,
+        completionTokens: result.usage.completionTokens,
+        estimated: result.usage.estimated ?? false,
+        contextWindow: provider.contextWindow,
+      })}\n\n`);
     }
 
     res.write(`data: ${JSON.stringify({
@@ -634,7 +648,7 @@ async function runAgentIteration(
   iteration: number,
   traceId: string,
   maxTokensOverride?: number,
-): Promise<{ reply: string; actionPlan: ActionPlan | null; done: boolean; doneReason?: string; reasoningContent?: string; finishReason?: string; toolCalls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> }> {
+): Promise<{ reply: string; actionPlan: ActionPlan | null; done: boolean; doneReason?: string; reasoningContent?: string; finishReason?: string; toolCalls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>; usage?: LlmUsage }> {
   const turn = await executeTurn({
     provider,
     messages,
@@ -648,6 +662,18 @@ async function runAgentIteration(
     maxTokensOverride,
     turnNumber: iteration,
   });
+
+  // Surface per-turn token usage to the frontend (context ring). Emitted
+  // right after the turn resolves so the ring updates even mid-loop.
+  if (turn.usage) {
+    onEvent({
+      type: "usage",
+      promptTokens: turn.usage.promptTokens,
+      completionTokens: turn.usage.completionTokens,
+      estimated: turn.usage.estimated ?? false,
+      contextWindow: provider.contextWindow,
+    });
+  }
 
   // Log each tool call issued (for any turn that had them).
   if (turn.toolCalls) {
@@ -670,6 +696,7 @@ async function runAgentIteration(
         reasoningContent: turn.reasoningContent,
         finishReason: turn.finishReason,
         toolCalls: turn.toolCalls,
+        usage: turn.usage,
       };
     }
     case "tool_calls_pending": {
@@ -689,6 +716,7 @@ async function runAgentIteration(
         reasoningContent: turn.reasoningContent,
         finishReason: turn.finishReason,
         toolCalls: tcs,
+        usage: turn.usage,
       };
     }
     case "length_truncated": {
@@ -703,6 +731,7 @@ async function runAgentIteration(
         reasoningContent: turn.reasoningContent,
         finishReason: turn.finishReason,
         toolCalls: undefined,
+        usage: turn.usage,
       };
     }
     case "no_content": {
@@ -715,6 +744,7 @@ async function runAgentIteration(
         reasoningContent: turn.reasoningContent,
         finishReason: turn.finishReason,
         toolCalls: undefined,
+        usage: turn.usage,
       };
     }
     case "error": {
@@ -732,6 +762,7 @@ async function runAgentIteration(
         reasoningContent: turn.reasoningContent,
         finishReason: turn.finishReason,
         toolCalls: undefined,
+        usage: turn.usage,
       };
     }
   }
@@ -1117,7 +1148,7 @@ app.post("/v1/chat/agent-continue", async (req, res) => {
     const continueIteration = (session._continueIteration ? session._continueIteration + 1 : 1);
     session._continueIteration = continueIteration;
 
-    let result: { reply: string; actionPlan: ActionPlan | null; reasoningContent?: string; finishReason?: string; doneReason?: string; toolCalls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>; error?: string; nextMaxTokens?: number };
+    let result: { reply: string; actionPlan: ActionPlan | null; reasoningContent?: string; finishReason?: string; doneReason?: string; toolCalls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>; error?: string; nextMaxTokens?: number; usage?: LlmUsage };
     try {
       const turn = await executeTurn({
         provider,
@@ -1140,7 +1171,18 @@ app.post("/v1/chat/agent-continue", async (req, res) => {
         doneReason: turn.doneReason,
         error: turn.error,
         nextMaxTokens: turn.nextMaxTokens,
+        usage: turn.usage,
       };
+      // Context ring: surface per-turn usage to the frontend.
+      if (turn.usage) {
+        res.write(`data: ${JSON.stringify({
+          type: "usage",
+          promptTokens: turn.usage.promptTokens,
+          completionTokens: turn.usage.completionTokens,
+          estimated: turn.usage.estimated ?? false,
+          contextWindow: provider.contextWindow,
+        })}\n\n`);
+      }
     } catch (error) {
       // Hard error that executeTurn didn't handle (e.g. AbortError).
       throw error;
@@ -1174,7 +1216,17 @@ app.post("/v1/chat/agent-continue", async (req, res) => {
         doneReason: retryTurn.doneReason,
         error: retryTurn.error,
         nextMaxTokens: retryTurn.nextMaxTokens,
+        usage: retryTurn.usage,
       };
+      if (retryTurn.usage) {
+        res.write(`data: ${JSON.stringify({
+          type: "usage",
+          promptTokens: retryTurn.usage.promptTokens,
+          completionTokens: retryTurn.usage.completionTokens,
+          estimated: retryTurn.usage.estimated ?? false,
+          contextWindow: provider.contextWindow,
+        })}\n\n`);
+      }
     }
 
     // Doom-loop guard: track recent tool fingerprints across agent-continue

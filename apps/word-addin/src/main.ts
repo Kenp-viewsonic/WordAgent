@@ -141,6 +141,91 @@ const fileInput = $<HTMLInputElement>("fileInput");
 const sendBtn = $<HTMLButtonElement>("sendMsg");
 const stopBtn = $<HTMLButtonElement>("stopBtn");
 const attachBtnEl = $<HTMLButtonElement>("attachBtn");
+const contextMeter = $<HTMLDivElement>("contextMeter");
+const contextRingFg = contextMeter.querySelector<SVGCircleElement>(".context-ring-fg")!;
+const contextRingText = contextMeter.querySelector<HTMLElement>(".context-ring-text")!;
+
+// ─── Context Usage Ring ─────────────────────────────────────────────────────
+
+/**
+ * Current session context usage, updated from the `usage` SSE events the
+ * server emits after each LLM turn. `promptTokens` is the full context the
+ * model saw on the latest turn (system prompt + history + tool results).
+ */
+const contextUsage: {
+  promptTokens: number | null;
+  completionTokens: number;
+  estimated: boolean;
+  contextWindow: number | null;
+} = {
+  promptTokens: null,
+  completionTokens: 0,
+  estimated: false,
+  contextWindow: null,
+};
+
+const RING_CIRCUMFERENCE = 2 * Math.PI * 15.5; // r=15.5 → ≈97.39
+
+function formatTokensShort(n: number): string {
+  if (n >= 1_000_000) return `${Math.round(n / 100_000) / 10}M`;
+  if (n >= 1_000) return `${Math.round(n / 100) / 10}k`;
+  return String(n);
+}
+
+/**
+ * Render the context-usage ring. Hidden until the first usage event arrives.
+ * Colors: brand green < 70%, amber < 90%, red ≥ 90%.
+ */
+function renderContextMeter(): void {
+  const { promptTokens, contextWindow } = contextUsage;
+  if (promptTokens === null) {
+    contextMeter.style.display = "none";
+    return;
+  }
+
+  contextMeter.style.display = "";
+  const ratio = contextWindow && contextWindow > 0 ? Math.min(promptTokens / contextWindow, 1) : 0;
+  const offset = RING_CIRCUMFERENCE * (1 - ratio);
+  contextRingFg.style.strokeDasharray = String(RING_CIRCUMFERENCE);
+  contextRingFg.style.strokeDashoffset = String(offset);
+
+  contextMeter.classList.toggle("warn", ratio >= 0.7 && ratio < 0.9);
+  contextMeter.classList.toggle("danger", ratio >= 0.9);
+
+  const pct = contextWindow && contextWindow > 0 ? `${Math.round(ratio * 100)}%` : formatTokensShort(promptTokens);
+  contextRingText.textContent = contextWindow && contextWindow > 0 ? pct : formatTokensShort(promptTokens);
+
+  const detail =
+    `上下文：${formatTokensShort(promptTokens)} / ${contextWindow ? formatTokensShort(contextWindow) : "未配置"} tokens` +
+    `（本轮输出 ${formatTokensShort(contextUsage.completionTokens)}）` +
+    (contextUsage.estimated ? " · 估算值" : "");
+  contextMeter.title = detail;
+}
+
+/** Reset the ring — called on session switch / clear / new session. */
+function resetContextMeter(): void {
+  contextUsage.promptTokens = null;
+  contextUsage.completionTokens = 0;
+  contextUsage.estimated = false;
+  renderContextMeter();
+}
+
+/** Apply a `usage` SSE event to the ring state. */
+function applyUsageEvent(ev: { promptTokens?: number; completionTokens?: number; estimated?: boolean; contextWindow?: number }): void {
+  if (ev.promptTokens !== undefined && ev.promptTokens !== null) {
+    contextUsage.promptTokens = ev.promptTokens;
+  }
+  if (ev.completionTokens !== undefined && ev.completionTokens !== null) {
+    contextUsage.completionTokens = ev.completionTokens;
+  }
+  contextUsage.estimated = Boolean(ev.estimated);
+  if (ev.contextWindow !== undefined && ev.contextWindow !== null && ev.contextWindow > 0) {
+    contextUsage.contextWindow = ev.contextWindow;
+  } else if (cachedProviderConfig?.contextWindow && cachedProviderConfig.contextWindow > 0) {
+    contextUsage.contextWindow = cachedProviderConfig.contextWindow;
+  }
+  renderContextMeter();
+}
 
 /**
  * Toggle UI between "sending" and "idle" states.
@@ -299,6 +384,7 @@ type ProviderConfigView = {
   thinkingEffort?: "medium" | "high";
   thinkingFormat?: "deepseek" | "openai";
   maxIterations?: number;
+  contextWindow?: number;
 };
 
 /**
@@ -671,6 +757,7 @@ function switchToSession(sessionId: string): void {
   state.activeSessionId = sessionId;
   const target = getActiveSession();
   clearChatLog();
+  resetContextMeter();
 
   if (target) {
     renderSessionMessages(target.messages);
@@ -707,6 +794,7 @@ function clearCurrentSession(): void {
   session.updatedAt = Date.now();
   clearChatLog();
   state.lastReply = "";
+  resetContextMeter();
   saveSessionsToStorage();
   setStatus(chatStatus, "已清空当前会话");
 }
@@ -992,6 +1080,9 @@ async function loadProviderConfig(): Promise<void> {
     $<HTMLInputElement>("firstTokenTimeout").value = String(data.firstTokenTimeout ?? 20);
     $<HTMLInputElement>("overallTimeout").value = String(data.overallTimeout ?? 240);
     $<HTMLInputElement>("maxIterations").value = String(data.maxIterations ?? 10);
+    const cwInput = $<HTMLInputElement>("contextWindow");
+    cwInput.value = data.contextWindow ? String(data.contextWindow) : "";
+    cwInput.placeholder = data.contextWindow ? String(data.contextWindow) : "如 65536（用于会话上下文用量显示）";
 
     const apiKeyInput = $<HTMLInputElement>("apiKey");
     apiKeyInput.value = "";
@@ -1088,6 +1179,7 @@ async function saveProviderConfig(): Promise<void> {
       thinkingEffort: $<HTMLSelectElement>("thinkingEffort").value,
       thinkingFormat: $<HTMLSelectElement>("thinkingFormat").value,
       maxIterations: Number($<HTMLInputElement>("maxIterations").value || "10"),
+      contextWindow: Number($<HTMLInputElement>("contextWindow").value) || undefined,
     };
 
     // 只在用户实际输入了 apiKey 时才发送，否则由后端保留已保存的 key
@@ -1123,6 +1215,7 @@ async function saveProviderConfig(): Promise<void> {
       thinkingEffort: body.thinkingEffort,
       thinkingFormat: body.thinkingFormat,
       maxIterations: body.maxIterations,
+      contextWindow: body.contextWindow,
     };
 
     setStatus(configStatus, apiKeyRaw ? "保存成功" : "保存成功（API Key 已保留）");
@@ -3271,6 +3364,10 @@ type StreamEvent = {
   retrievalCount?: number;
   citations?: Array<{ fileName: string }>;
   error?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  estimated?: boolean;
+  contextWindow?: number;
 };
 
 type AgentStreamEvent =
@@ -3283,6 +3380,7 @@ type AgentStreamEvent =
   | { type: "session"; sessionId: string }
   | { type: "await_tool_result"; iteration: number }
   | { type: "fallback"; reason: string }
+  | { type: "usage"; promptTokens?: number; completionTokens?: number; estimated?: boolean; contextWindow?: number }
   | { type: "done"; reply: string; actionPlan?: ActionPlan | null; sessionId?: string; retrievalCount?: number; citations?: Array<{ fileName: string }> }
   | { type: "error"; error: string };
 
@@ -3471,6 +3569,10 @@ async function sendAgentMessageStream(
         sessionId = event.sessionId;
       }
 
+      if (event.type === "usage") {
+        applyUsageEvent(event);
+      }
+
       if (event.type === "tool_call") {
         hasToolCall = true;
 
@@ -3614,6 +3716,10 @@ async function continueAgentLoop(
 
     let hasToolCall = false;
     for (const event of events) {
+      if (event.type === "usage") {
+        applyUsageEvent(event);
+      }
+
       if (event.type === "tool_call") {
         hasToolCall = true;
 
@@ -3783,6 +3889,10 @@ async function sendMessageStream(
         if (data.type === "delta" && data.delta) {
           fullReply += data.delta;
           onDelta(fullReply);
+        }
+
+        if (data.type === "usage") {
+          applyUsageEvent(data);
         }
 
         if (data.type === "error") {

@@ -20,7 +20,7 @@
  * the old `isPerceptionOnlyPlan` / `isIterablePlan` categorization that
  * doubled the branching logic.
  */
-import { ActionPlan, ChatMessage, ProviderConfig, RetrievalChunk, ToolDefinition } from "./types.js";
+import { ActionPlan, ChatMessage, LlmUsage, ProviderConfig, RetrievalChunk, ToolDefinition } from "./types.js";
 import { streamOpenAICompatible, parseActionPlanFromToolCalls, callOpenAICompatible, LlmHttpError } from "./llm.js";
 
 /**
@@ -68,6 +68,10 @@ export interface TurnResult {
   // If `length_truncated` was bumped, this is the new value used by the
   // caller's next `executeTurn` invocation. Undefined otherwise.
   nextMaxTokens?: number;
+
+  // Token usage for this turn (provider-reported, or estimated when the
+  // provider doesn't return usage). Drives the frontend context ring.
+  usage?: LlmUsage;
 }
 
 export interface ExecuteTurnParams {
@@ -266,6 +270,7 @@ export async function executeTurn(params: ExecuteTurnParams): Promise<TurnResult
         done: true,
         doneReason: "task_complete",
         taskCompleteSummary: summary,
+        usage: llmResult.usage,
       };
     }
 
@@ -278,6 +283,7 @@ export async function executeTurn(params: ExecuteTurnParams): Promise<TurnResult
       toolCalls,
       done: false,
       doneReason: "tool_calls_pending",
+      usage: llmResult.usage,
     };
   }
 
@@ -298,6 +304,7 @@ export async function executeTurn(params: ExecuteTurnParams): Promise<TurnResult
       done: false,
       doneReason: "length_truncated",
       nextMaxTokens: bumped,
+      usage: llmResult.usage,
     };
   }
 
@@ -311,6 +318,7 @@ export async function executeTurn(params: ExecuteTurnParams): Promise<TurnResult
       toolCalls: undefined,
       done: true,
       doneReason: "no_content",
+      usage: llmResult.usage,
     };
   }
 
@@ -322,6 +330,7 @@ export async function executeTurn(params: ExecuteTurnParams): Promise<TurnResult
     toolCalls: undefined,
     done: true,
     doneReason: "final_reply",
+    usage: llmResult.usage,
   };
 }
 

@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Extensibility;
+using Microsoft.CSharp.RuntimeBinder;
 using Microsoft.Win32;
 
 namespace OfficeAgent.ComHost
@@ -28,6 +29,7 @@ namespace OfficeAgent.ComHost
         private const string AddinsKeyPath = @"Software\Microsoft\Office\Word\Addins\";
         private const string LockbackInterfacePath = @"Interface\{000C0601-0000-0000-C000-000000000046}";
 
+        private static object ctpFactory; // Microsoft.Office.Core.ICTPFactory (late-bound)
         private static object taskPane; // Microsoft.Office.Core.CustomTaskPane (late-bound)
         private static AgentTaskPane paneControl;
 
@@ -89,6 +91,7 @@ namespace OfficeAgent.ComHost
                 // pane may already be gone
             }
             taskPane = null;
+            ctpFactory = null;
         }
 
         public void OnAddInsUpdate(ref Array custom) { }
@@ -119,7 +122,7 @@ namespace OfficeAgent.ComHost
             Trace("OnOpenPanel taskPane=" + (taskPane != null));
             try
             {
-                if (taskPane == null)
+                if (ctpFactory == null)
                 {
                     MessageBox.Show(
                         "任务窗格尚未就绪（宿主未提供 CTP 工厂），请重启 Word 后重试。",
@@ -127,6 +130,16 @@ namespace OfficeAgent.ComHost
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning);
                     return;
+                }
+
+                // The pane dies with its document window; recreate it against
+                // the current window instead of toggling a zombie RCW.
+                if (PaneIsDead())
+                {
+                    Trace("OnOpenPanel: pane is dead, recreating");
+                    taskPane = null;
+                    paneControl = null;
+                    CreatePane();
                 }
 
                 dynamic ctp = taskPane;
@@ -155,15 +168,14 @@ namespace OfficeAgent.ComHost
         {
             try
             {
-                dynamic factory = ctpFactoryInst;
-                taskPane = factory.CreateCTP(AgentTaskPane.ProgId, "Word Agent", Type.Missing);
-                dynamic ctp = taskPane;
-                ctp.DockPosition = 2; // msoCTPDockPositionRight
-                ctp.Width = 420;
-                ctp.Visible = false; // the Ribbon button toggles it
-
-                object content = ctp.ContentControl;
-                paneControl = content as AgentTaskPane ?? AgentTaskPane.LastInstance;
+                // Keep the factory: a CTP is bound to the window that was
+                // active at creation time. When the user closes that document
+                // window the pane dies with it, and the cached CustomTaskPane
+                // RCW turns into a zombie (0x80070002 / 0x800A01A8 on every
+                // access). OnOpenPanel recreates the pane against the current
+                // window when that happens.
+                ctpFactory = ctpFactoryInst;
+                CreatePane();
                 Trace("CTP created");
             }
             catch (Exception ex)
@@ -174,6 +186,46 @@ namespace OfficeAgent.ComHost
                     "Word Agent",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
+            }
+        }
+
+        private static void CreatePane()
+        {
+            dynamic factory = ctpFactory;
+            taskPane = factory.CreateCTP(AgentTaskPane.ProgId, "Word Agent", Type.Missing);
+            dynamic ctp = taskPane;
+            ctp.DockPosition = 2; // msoCTPDockPositionRight
+            ctp.Width = 420;
+            ctp.Visible = false; // the Ribbon button toggles it
+
+            object content = ctp.ContentControl;
+            paneControl = content as AgentTaskPane ?? AgentTaskPane.LastInstance;
+        }
+
+        /// <summary>
+        /// True when the cached pane's window is gone (document closed) — the
+        /// RCW is a zombie and every member access throws. Word recreates the
+        /// pane automatically for windows opened while the add-in is loaded,
+        /// so a null/valid pane is left alone.
+        /// </summary>
+        private static bool PaneIsDead()
+        {
+            if (taskPane == null) return false;
+            try
+            {
+                dynamic ctp = taskPane;
+                // Touch a member that requires a live host object; a zombie
+                // throws here instead of at the Visible toggle.
+                _ = ctp.Window;
+                return false;
+            }
+            catch (COMException)
+            {
+                return true;
+            }
+            catch (RuntimeBinderException)
+            {
+                return true;
             }
         }
 

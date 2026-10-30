@@ -22,6 +22,20 @@ export type ProviderConfig = {
    * DeepSeek for deep research, Agnes for shallow edits). 1..50.
    */
   maxIterations?: number;
+  /**
+   * Model context window size in tokens (e.g. 65536). Used by the chat UI
+   * to render the context-usage ring. Optional — when unset the ring shows
+   * token counts without a percentage.
+   */
+  contextWindow?: number;
+};
+
+/** Token usage reported by the provider (or estimated when unavailable). */
+export type LlmUsage = {
+  promptTokens?: number;
+  completionTokens?: number;
+  /** True when the values are local estimates instead of provider-reported. */
+  estimated?: boolean;
 };
 
 export type ConfigPreset = {

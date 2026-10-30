@@ -1,4 +1,4 @@
-import { ChatMessage, ProviderConfig, RetrievalChunk, ToolDefinition, ActionPlan, WordAction } from "./types.js";
+import { ChatMessage, ProviderConfig, RetrievalChunk, ToolDefinition, ActionPlan, WordAction, LlmUsage } from "./types.js";
 import { logRequestStart, logResponseRaw, logResponseParsed, logError } from "./agent-logger.js";
 import { recordLlmUsage } from "./stats.js";
 
@@ -1214,7 +1214,7 @@ export async function callOpenAICompatible(
   documentStructureDescription?: string,
   dynamicContext?: { documentContext?: string; selection?: string },
   bare: boolean = false
-): Promise<{ reply: string; actionPlan: ActionPlan | null; reasoningContent?: string; finishReason?: string; toolCalls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> }> {
+): Promise<{ reply: string; actionPlan: ActionPlan | null; reasoningContent?: string; finishReason?: string; toolCalls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>; usage?: LlmUsage }> {
   const payload = buildPayload(config, messages, contextChunks, false, tools, insertMode, documentStructureDescription, dynamicContext, bare);
   const endpoint = getEndpoint(config);
   const timeoutMs = Number(process.env.LLM_TIMEOUT_MS ?? 180_000);
@@ -1277,11 +1277,15 @@ export async function callOpenAICompatible(
   const message = choice?.message;
 
   // Usage hook (batch A stats) — recorded even when the reply is empty.
+  // Also surfaced to the caller so the frontend can render the context ring.
+  const usage: LlmUsage | undefined = data.usage
+    ? { promptTokens: data.usage.prompt_tokens, completionTokens: data.usage.completion_tokens }
+    : undefined;
   if (data.usage) recordLlmUsage(data.usage.prompt_tokens, data.usage.completion_tokens);
 
   if (!message) {
     await logResponseParsed(traceId, { reply: "模型没有返回可用内容。", actionPlan: null });
-    return { reply: "模型没有返回可用内容。", actionPlan: null };
+    return { reply: "模型没有返回可用内容。", actionPlan: null, usage };
   }
 
   const reasoningContent = message.reasoning_content || undefined;
@@ -1293,7 +1297,7 @@ export async function callOpenAICompatible(
     // If there's also text content, include it as the reply
     const reply = message.content?.trim() || actionPlan.explanation;
     await logResponseParsed(traceId, { reply, actionPlan, toolCalls: message.tool_calls });
-    return { reply, actionPlan, reasoningContent, finishReason, toolCalls: message.tool_calls };
+    return { reply, actionPlan, reasoningContent, finishReason, toolCalls: message.tool_calls, usage };
   }
 
   // No tool_calls — check for text-based action plan (fallback)
@@ -1302,7 +1306,7 @@ export async function callOpenAICompatible(
   const reply = textActionPlan ? extractTextReply(textContent) || textActionPlan.explanation : textContent;
 
   await logResponseParsed(traceId, { reply, actionPlan: textActionPlan });
-  return { reply, actionPlan: textActionPlan, reasoningContent, finishReason };
+  return { reply, actionPlan: textActionPlan, reasoningContent, finishReason, usage };
 }
 
 // Helper to check if an action plan contains only perception tools
@@ -1357,7 +1361,7 @@ export async function streamOpenAICompatible(
   insertMode?: string,
   documentStructureDescription?: string,
   dynamicContext?: { documentContext?: string; selection?: string }
-): Promise<{ reply: string; actionPlan: ActionPlan | null; reasoningContent?: string; finishReason?: string; toolCalls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> }> {
+): Promise<{ reply: string; actionPlan: ActionPlan | null; reasoningContent?: string; finishReason?: string; toolCalls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>; usage?: LlmUsage }> {
   const payload = buildPayload(config, messages, contextChunks, true, tools, insertMode, documentStructureDescription, dynamicContext);
   const endpoint = getEndpoint(config);
   const overallTimeoutMs = config.overallTimeout ? config.overallTimeout * 1000 : Number(process.env.LLM_STREAM_TIMEOUT_MS ?? 240_000);
@@ -1471,12 +1475,15 @@ export async function streamOpenAICompatible(
     const choice = data.choices?.[0];
     const message = choice?.message;
 
-    // Usage hook (batch A stats)
+    // Usage hook (batch A stats) + context-ring surfacing
+    const usage: LlmUsage | undefined = data.usage
+      ? { promptTokens: data.usage.prompt_tokens, completionTokens: data.usage.completion_tokens }
+      : undefined;
     if (data.usage) recordLlmUsage(data.usage.prompt_tokens, data.usage.completion_tokens);
 
     if (!message) {
       await logResponseParsed(traceId, { reply: "模型没有返回可用内容。", actionPlan: null });
-      return { reply: "模型没有返回可用内容。", actionPlan: null };
+      return { reply: "模型没有返回可用内容。", actionPlan: null, usage };
     }
 
     const reasoningContent = message.reasoning_content || undefined;
@@ -1490,7 +1497,7 @@ export async function streamOpenAICompatible(
         onDelta(reply);
       }
       await logResponseParsed(traceId, { reply, actionPlan, toolCalls: message.tool_calls });
-      return { reply, actionPlan, reasoningContent, finishReason, toolCalls: message.tool_calls };
+      return { reply, actionPlan, reasoningContent, finishReason, toolCalls: message.tool_calls, usage };
     }
 
     const textContent = message.content?.trim() || "模型没有返回可用内容。";
@@ -1500,7 +1507,7 @@ export async function streamOpenAICompatible(
       onDelta(textContent);
     }
     await logResponseParsed(traceId, { reply, actionPlan: textActionPlan });
-    return { reply, actionPlan: textActionPlan, reasoningContent, finishReason };
+    return { reply, actionPlan: textActionPlan, reasoningContent, finishReason, usage };
   }
 
   if (!response.body) {
@@ -1519,6 +1526,7 @@ export async function streamOpenAICompatible(
   let fullReasoning = "";
   let lastFinishReason: string | undefined;
   let pendingToolCalls: Map<number, { id: string; name: string; arguments: string }> = new Map();
+  let streamUsage: LlmUsage | undefined;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -1557,6 +1565,7 @@ export async function streamOpenAICompatible(
       // on the final chunk.
       if (parsed.usage) {
         recordLlmUsage(parsed.usage.prompt_tokens, parsed.usage.completion_tokens);
+        streamUsage = { promptTokens: parsed.usage.prompt_tokens, completionTokens: parsed.usage.completion_tokens };
       }
 
       const delta = parsed.choices?.[0]?.delta;
@@ -1649,7 +1658,7 @@ export async function streamOpenAICompatible(
     const actionPlan = parseActionPlanFromToolCalls(toolCalls);
     const reply = fullText.trim() || actionPlan.explanation;
     await logResponseParsed(traceId, { reply, actionPlan, toolCalls });
-    return { reply, actionPlan, reasoningContent: fullReasoning || undefined, finishReason: lastFinishReason, toolCalls };
+    return { reply, actionPlan, reasoningContent: fullReasoning || undefined, finishReason: lastFinishReason, toolCalls, usage: streamUsage ?? estimateUsage(payload.messages, fullText, fullReasoning) };
   }
 
   // No tool calls — check for text-based action plan.
@@ -1659,5 +1668,17 @@ export async function streamOpenAICompatible(
   const textActionPlan = parseActionPlanFromText(fullText);
   const reply = textActionPlan ? extractTextReply(fullText) || textActionPlan.explanation : fullText.trim() || "模型没有返回可用内容。";
   await logResponseParsed(traceId, { reply, actionPlan: textActionPlan });
-  return { reply, actionPlan: textActionPlan, reasoningContent: fullReasoning || undefined, finishReason: lastFinishReason };
+  return { reply, actionPlan: textActionPlan, reasoningContent: fullReasoning || undefined, finishReason: lastFinishReason, usage: streamUsage ?? estimateUsage(payload.messages, fullText, fullReasoning) };
+}
+
+/**
+ * Fallback token estimate when the provider doesn't report usage (some
+ * OpenAI-compatible backends ignore stream_options.include_usage).
+ * Rough heuristic: ~1 token per 2.5 chars for mixed CJK/English text.
+ */
+function estimateUsage(messages: ChatMessage[], replyText: string, reasoningText: string): LlmUsage {
+  const promptChars = messages.reduce((sum, m) => sum + (m.content?.length ?? 0), 0);
+  const promptTokens = Math.ceil(promptChars / 2.5);
+  const completionTokens = Math.ceil((replyText.length + reasoningText.length) / 2.5);
+  return { promptTokens, completionTokens, estimated: true };
 }
